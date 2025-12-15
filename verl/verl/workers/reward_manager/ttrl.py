@@ -156,6 +156,7 @@ class TTRLRewardManager:
                 task = None
 
                 for i in range(self.n_samples_per_prompt):
+                    # get data item
                     data_item = data[prompt_i * self.n_samples_per_prompt + i]
                     prompt_idx = data_item.batch["prompts"]
                     prompt_length = prompt_idx.shape[-1]

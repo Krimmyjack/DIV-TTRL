@@ -35,7 +35,7 @@ from collections import Counter, defaultdict
 from functools import partial
 import numpy as np
 import torch
-
+from math import cos, pi
 from verl import DataProto
 from verl.utils.reward_score.ttrl.auto_verify import auto_verify
 from verl.utils.reward_score.ttrl.ttt_metrics import (
@@ -102,6 +102,7 @@ class DiversityTTRLRewardManager:
         )
 
     def _extract_after_think(self, text: str) -> str:
+        """Extract content after </think> tag for semantic similarity calculation"""
         think_end_tag = "</think>"
         think_end = text.find(think_end_tag)
         if think_end != -1:
@@ -109,6 +110,10 @@ class DiversityTTRLRewardManager:
         return text.strip()
 
     def _extract_final_answers(self, task: str, outputs: list[str]) -> list[str]:
+        """
+        Extract final answers from outputs for diversity calculation.
+        Uses task-specific answer extraction logic.
+        """
         extract_fn = partial(extract_answer, data_name=task)
         normalized_outputs = [normalize_latex(x) for x in outputs]
         final_answers = [extract_fn(text) or "<empty>" for text in normalized_outputs]
@@ -130,67 +135,61 @@ class DiversityTTRLRewardManager:
         return prompt_str, response_str, valid_response_length
 
     def _compute_strategy_entropy(self, data_items):
-        try:
-            if not data_items:
-                return 0.0
-
-            total_neg_log_likelihood = 0.0
-            total_sequences = 0
-            first_success = True
-
-            for data_item in data_items:
-                try:
-                    if hasattr(data_item, "batch") and "old_log_probs" in data_item.batch:
-                        prompt_length = data_item.batch["prompts"].shape[-1]
-                        attention_mask = data_item.batch.get("attention_mask", None)
-
-                        if attention_mask is not None and len(attention_mask) > prompt_length:
-                            response_length = attention_mask[prompt_length:].sum().item()
-
-                            if response_length > 0:
-                                old_log_probs = data_item.batch["old_log_probs"]
-                                if isinstance(old_log_probs, torch.Tensor) and old_log_probs.numel() > 0:
-                                    log_probs_length = old_log_probs.shape[-1]
-                                    if log_probs_length == response_length:
-                                        response_log_probs = old_log_probs
-                                    elif log_probs_length == prompt_length + response_length:
-                                        response_log_probs = old_log_probs[
-                                            prompt_length:prompt_length + response_length
-                                        ]
-                                    elif log_probs_length > response_length:
-                                        response_log_probs = old_log_probs[-response_length:]
-                                    else:
-                                        continue
-
-                                    if response_log_probs.numel() > 0:
-                                        sequence_log_prob = torch.sum(response_log_probs).item()
-                                        normalized_neg_log_likelihood = -sequence_log_prob / response_length
-                                        total_neg_log_likelihood += normalized_neg_log_likelihood
-                                        total_sequences += 1
-
-                                        if first_success:
-                                            print(
-                                                "    Strategy entropy calculation enabled: "
-                                                f"old_log_probs shape={old_log_probs.shape}, "
-                                                f"response_length={response_length}"
-                                            )
-                                            first_success = False
-                except Exception:
-                    continue
-
-            if total_sequences > 0:
-                return total_neg_log_likelihood / total_sequences
+        if not data_items:
             return 0.0
-
-        except Exception:
+        
+        log_probs_list = []
+        response_lengths = []
+        
+        # 第一遍：过滤和提取（无异常捕获）
+        for data_item in data_items:
+            if not hasattr(data_item, "batch") or "old_log_probs" not in data_item.batch:
+                continue
+            
+            batch = data_item.batch
+            attention_mask = batch.get("attention_mask", None)
+            if attention_mask is None or len(attention_mask) <= batch["prompts"].shape[-1]:
+                continue
+            
+            prompt_length = batch["prompts"].shape[-1]
+            response_length_val = attention_mask[prompt_length:].sum().item()
+            if response_length_val <= 0:
+                continue
+            
+            old_log_probs = batch["old_log_probs"]
+            if not isinstance(old_log_probs, torch.Tensor) or old_log_probs.numel() == 0:
+                continue
+            
+            # 裁切逻辑（同上）
+            log_probs_length = old_log_probs.shape[-1]
+            if log_probs_length == response_length_val:
+                response_log_probs = old_log_probs
+            elif log_probs_length == prompt_length + response_length_val:
+                response_log_probs = old_log_probs[prompt_length:prompt_length + response_length_val]
+            elif log_probs_length > response_length_val:
+                response_log_probs = old_log_probs[-response_length_val:]
+            else:
+                continue
+            
+            log_probs_list.append(response_log_probs.sum().item())
+            response_lengths.append(response_length_val)
+        
+        if not log_probs_list:
             return 0.0
-
+        
+        # 向量计算（一次性）
+        log_probs_array = np.array(log_probs_list)
+        response_lengths_array = np.array(response_lengths)
+        neg_log_likelihoods = -log_probs_array / response_lengths_array
+        
+        return float(np.mean(neg_log_likelihoods))
+        
     def _apply_diversity_adjustment(
         self,
         pred_outputs: list[str],
         base_rewards: list[float],
         task: str,
-    ) -> list[float]:
+    ) -> tuple[list[float], float]:
         """
         Apply count-based diversity adjustment to negative rewards within a prompt group.
         """
@@ -200,6 +199,7 @@ class DiversityTTRLRewardManager:
 
         unique_answers = len(freq)
         majority_num = max(freq.values()) if freq else 0
+        diversity_ratio = unique_answers / n_answers if n_answers > 0 else 0.0
         denom = n_answers - majority_num
 
         final_rewards: list[float] = []
@@ -210,26 +210,46 @@ class DiversityTTRLRewardManager:
                 adjusted_reward = 0.5 + 0.5 * diversity_reward
                 adjusted_reward = max(0.5, min(adjusted_reward, 1.0))
                 final_rewards.append(float(adjusted_reward))
+                # final_rewards.append(float(base_reward))
                 continue
 
             ci = freq.get(final_answers[idx], 1)
             diversity_term = 0.0
             if unique_answers > 1 and denom > 0:
+                # use factional scaling
                 diversity_term = ((unique_answers - 1) / denom) * (1.0 / ci)
+                # use non-linear scaling
+                # diversity_term = ((unique_answers - 1) / denom) * cos(ci/ (self.n_votes_per_prompt / 2 ) * (pi / 2))
+                # use linear scaling
+                # diversity_term = ((unique_answers - 1) / denom) * (1- (ci) / (self.n_votes_per_prompt/2 ))
                 diversity_term = max(0.0, min(diversity_term, 1.0))
 
-            adjusted_reward = -1.0 + 0.5 * diversity_term
+            adjusted_reward = -1.0 + diversity_term
             adjusted_reward = max(-1.0, min(adjusted_reward, -0.5))
             final_rewards.append(float(adjusted_reward))
 
-        return final_rewards
+        # 返回最终奖励以及本组的多样性比率，调用方负责把该指标写入 ttrl_metrics
+        return final_rewards, float(diversity_ratio)
 
     # === Metrics ===
     def compute_post_ttrl_metrics(self, data: DataProto):
+        """
+        Compute post-TTRL training evaluation metrics
+        
+        This method is used to evaluate the effectiveness of TTRL training by analyzing
+        the quality and consistency of model-generated answers.
+        
+        Args:
+            data (DataProto): Data containing prompts, responses and labels
+            
+        Returns:
+            dict: Dictionary containing various evaluation metrics
+        """
         assert len(data) % self.n_samples_per_prompt == 0, (
             f"Length of data {len(data)} should be divisible by n_samples_per_prompt {self.n_samples_per_prompt}"
         )
         prompt_num = len(data) // self.n_samples_per_prompt
+        print(f"Computing post-TTRL metrics, {prompt_num} prompts in total...")
 
         post_ttrl_info = {}
         post_ttrl_metrics_list = defaultdict(list)
@@ -243,10 +263,18 @@ class DiversityTTRLRewardManager:
 
             for i in range(self.n_samples_per_prompt):
                 data_item = data[prompt_i * self.n_samples_per_prompt + i]
-                prompt_str, response_str, _ = self._decode_data_item(data_item)
+                prompt_idx = data_item.batch["prompts"]
+                prompt_length = prompt_idx.shape[-1]
+                valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+                valid_prompt_idx = prompt_idx[-valid_prompt_length:]
+                response_idx = data_item.batch["responses"]
+                valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+                valid_response_idx = response_idx[:valid_response_length]
+                prompt_str = self.tokenizer.decode(valid_prompt_idx, skip_special_tokens=False)
+                response_str = self.tokenizer.decode(valid_response_idx, skip_special_tokens=False)
                 ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
                 data_source = data_item.non_tensor_batch[self.reward_fn_key]
-                vote_reward = data_item.batch.get("acc", 0.0)
+                vote_reward = data_item.batch["acc"]
                 extra_info = data_item.non_tensor_batch["extra_info"]
 
                 if task is None:
@@ -269,6 +297,7 @@ class DiversityTTRLRewardManager:
             for k, v in post_ttrl_metrics.items():
                 post_ttrl_metrics_list[k].append(v)
 
+        # Calculate average metrics and output
         for k, v in post_ttrl_metrics_list.items():
             if isinstance(v, list):
                 v = np.mean(v)
@@ -295,6 +324,12 @@ class DiversityTTRLRewardManager:
         already_print_data_sources = {}
         all_ttrl_metrics = defaultdict(list)
         scores = [0.0 for _ in range(len(data))]
+        
+        # === NEW: Collect answer_types and consistency_rate for diversity density advantage ===
+        # answer_types: per-sample answer type id (hash of extracted answer)
+        # consistency_rate: per-sample self-consistency rate (majority_ratio from this prompt group)
+        all_answer_types = []
+        all_consistency_rates = []
 
         for prompt_i in range(prompt_num):
             group_pred_outputs = []
@@ -302,6 +337,7 @@ class DiversityTTRLRewardManager:
             group_extra_info = []
             group_resp_lengths = []
             group_prompts = []
+            group_indices = []
             task = None
 
             for i in range(self.n_votes_per_prompt):
@@ -336,7 +372,24 @@ class DiversityTTRLRewardManager:
             if self.debug_mode and strategy_entropy > 0:
                 print(f"    Strategy entropy: H_ttrl={strategy_entropy:.3f} (normalized negative log-likelihood)")
 
-            final_rewards = self._apply_diversity_adjustment(group_pred_outputs, base_rewards, task)
+            final_rewards, diversity_ratio = self._apply_diversity_adjustment(group_pred_outputs, base_rewards, task)
+            # expose diversity metric for this group
+            ttrl_metrics["diversity_ratio"] = diversity_ratio
+            
+            # === NEW: Extract answer types and consistency rate for this prompt group ===
+            final_answers = self._extract_final_answers(task, group_pred_outputs)
+            freq = Counter(final_answers)
+            majority_num = max(freq.values()) if freq else 0
+            consistency_rate = majority_num / self.n_votes_per_prompt if self.n_votes_per_prompt > 0 else 0.0
+            
+            # Create answer type mapping (hash of answer string -> integer id)
+            answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
+            
+            for i in range(self.n_votes_per_prompt):
+                # Store answer type id for each sample
+                all_answer_types.append(answer_to_id[final_answers[i]])
+                # Store consistency rate (same for all samples in this prompt group)
+                all_consistency_rates.append(consistency_rate)
 
             for k, v in ttrl_metrics.items():
                 all_ttrl_metrics[k].append(v)
@@ -363,6 +416,20 @@ class DiversityTTRLRewardManager:
                     print(f"    [base_reward] {base_rewards[i]:.4f}")
 
         data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=data.batch["prompts"].device)
+        
+        # === NEW: Store answer_types and consistency_rate in non_tensor_batch for advantage computation ===
+        # Only store for the samples that will be used in training (first n_samples_per_prompt per prompt)
+        training_answer_types = []
+        training_consistency_rates = []
+        for prompt_i in range(prompt_num):
+            for i in range(self.n_samples_per_prompt):
+                global_idx = prompt_i * self.n_votes_per_prompt + i
+                training_answer_types.append(all_answer_types[global_idx])
+                training_consistency_rates.append(all_consistency_rates[global_idx])
+        
+        # Store in ttrl_info for downstream use
+        ttrl_info["_answer_types"] = np.array(training_answer_types)
+        ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
 
         print("\n=== TTRL Training Metrics Summary ===")
         for k, v in all_ttrl_metrics.items():
@@ -432,6 +499,8 @@ class DiversityTTRLRewardManager:
                 base_rewards[sample_idx] = float(rewards[idx_in_group])
 
         final_rewards = [0.0] * len(base_rewards)
+        # store per-prompt diversity ratios computed from outputs
+        prompt_diversity_ratios = [0.0] * prompt_num
         for prompt_i in range(prompt_num):
             start_idx = prompt_i * self.eval_n_samples
             end_idx = start_idx + self.eval_n_samples
@@ -441,7 +510,10 @@ class DiversityTTRLRewardManager:
             first_idx = prompt_i * self.eval_n_samples
             first_ds = data[first_idx].non_tensor_batch[self.reward_fn_key]
             prompt_task = self._data_source_to_task(first_ds)
-            prompt_final_rewards = self._apply_diversity_adjustment(prompt_outputs, prompt_base_rewards, prompt_task)
+            prompt_final_rewards, diversity_ratio = self._apply_diversity_adjustment(
+                prompt_outputs, prompt_base_rewards, prompt_task
+            )
+            prompt_diversity_ratios[prompt_i] = diversity_ratio
             for j, sample_idx in enumerate(range(start_idx, end_idx)):
                 final_rewards[sample_idx] = prompt_final_rewards[j]
 
@@ -479,6 +551,11 @@ class DiversityTTRLRewardManager:
             current_group_data = data[prompt_i * self.eval_n_samples : (prompt_i + 1) * self.eval_n_samples]
             strategy_entropy = self._compute_strategy_entropy(current_group_data)
             ttrl_metrics["neg_log_likelihood"] = strategy_entropy
+            # attach diversity metric computed earlier for this prompt
+            try:
+                ttrl_metrics["diversity_ratio"] = prompt_diversity_ratios[prompt_i]
+            except Exception:
+                ttrl_metrics["diversity_ratio"] = 0.0
 
             for k, v in ttrl_metrics.items():
                 all_ttrl_metrics[k].append(v)

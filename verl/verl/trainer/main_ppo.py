@@ -200,7 +200,7 @@ class TaskRunner:
         )
 
         # Note that we always use function-based RM for validation
-        if reward_manager_name in ["ttrl", "semantic_ttrl"]:
+        if reward_manager_name in ["ttrl", "semantic_ttrl","diversity_ttrl"]:
             val_reward_kwargs = dict(reward_kwargs)  # Copy training parameters
             val_reward_kwargs["mode"] = "eval"       # Override to eval mode
             val_reward_fn = reward_manager_cls(
