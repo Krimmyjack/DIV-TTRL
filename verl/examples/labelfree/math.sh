@@ -98,7 +98,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set default values
-    TASK=${TASK:-"AMC"}
+    TASK=${TASK:-"AIME"}
 BACKBONE=${BACKBONE:-"Qwen3-4B-Base"}
 CLIP_HIGH=${CLIP_HIGH:-"true"}
 CLIP_SPECIFIED=${CLIP_SPECIFIED:-"false"}
@@ -156,8 +156,8 @@ else
 fi
 
 # Set EPISODE
-EPISODE=14
-DATA_TRAIN_BATCH_SIZE=16
+EPISODE=30
+DATA_TRAIN_BATCH_SIZE=8
 N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
