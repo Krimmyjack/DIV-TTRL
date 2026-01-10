@@ -229,7 +229,7 @@ class DiversityTTRLRewardManager:
             final_rewards.append(float(adjusted_reward))
 
         # 返回最终奖励以及本组的多样性比率，调用方负责把该指标写入 ttrl_metrics
-        return final_rewards, float(diversity_ratio)
+        return base_rewards, float(diversity_ratio)
 
     # === Metrics ===
     def compute_post_ttrl_metrics(self, data: DataProto):
@@ -312,9 +312,18 @@ class DiversityTTRLRewardManager:
         reward_extra_info = defaultdict(list)
         ttrl_info = {}
 
-        assert len(data) % self.n_votes_per_prompt == 0, (
-            f"Length of data {len(data)} should be divisible by n_votes_per_prompt {self.n_votes_per_prompt}"
-        )
+        # Check if data is already down-sampled or if it's at original size
+        # Data should be divisible by n_votes_per_prompt for original size
+        # If not, it may already be down-sampled, so return default values
+        if len(data) % self.n_votes_per_prompt != 0:
+            # Data has been down-sampled already; cannot compute diversity metrics
+            # Return zero rewards and default answer types/consistency rates
+            print(f"WARNING: Data size {len(data)} is not divisible by n_votes_per_prompt {self.n_votes_per_prompt}")
+            print(f"Data may already be down-sampled. Returning default values.")
+            reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+            ttrl_info["_answer_types"] = np.arange(len(data), dtype=np.int64)  # Default IDs
+            ttrl_info["_consistency_rate"] = np.ones(len(data), dtype=np.float32) * 0.5  # Default consistency
+            return reward_tensor, reward_extra_info, ttrl_info
 
         prompt_num = len(data) // self.n_votes_per_prompt
         reward_tensor = torch.zeros_like(

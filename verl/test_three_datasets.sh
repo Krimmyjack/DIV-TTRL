@@ -287,7 +287,7 @@ evaluate_single_model() {
     echo "========================="
 
         # Set parameters based on model
-        local K=12
+        local K=4
 
     local MAX_PROMPT_LENGTH=1024
     local MAX_RESPONSE_LENGTH=$((1024 * K))
@@ -507,4 +507,3 @@ else
         exit 1
     fi
 fi
-

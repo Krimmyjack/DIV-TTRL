@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # === TTRL Training Script ===
-# Usage: ./math.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
+# Usage: ./evol_rl_no_embedding.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
 #
 # Parameters:
 #   --task      Task name (default: AIME-TTT)
@@ -19,11 +19,11 @@
 #   -h, --help  Show help information
 #
 # Examples:
-#   ./math.sh                                    # Use default parameters
-#   ./math.sh --task MATH                   # Specify task
-#   ./math.sh --task AIME --backbone Qwen3-4B-Base  # Specify task and model
-#   ./math.sh --clip-high                       # High clip ratio mode
-#   ./math.sh --temp 0.8                        # Set temperature parameter
+#   ./evol_rl_no_embedding.sh                                    # Use default parameters
+#   ./evol_rl_no_embedding.sh --task MATH                   # Specify task
+#   ./evol_rl_no_embedding.sh --task AIME --backbone Qwen3-4B-Base  # Specify task and model
+#   ./evol_rl_no_embedding.sh --clip-high                       # High clip ratio mode
+#   ./evol_rl_no_embedding.sh --temp 0.8                        # Set temperature parameter
 #
 # =======================
 
@@ -98,8 +98,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set default values
-TASK=${TASK:-"math_train"}
-BACKBONE=${BACKBONE:-"Qwen2.5-Math-1.5B"}
+    TASK=${TASK:-"AIME"}
+BACKBONE=${BACKBONE:-"Qwen3-4B-Base"}
 CLIP_HIGH=${CLIP_HIGH:-"true"}
 CLIP_SPECIFIED=${CLIP_SPECIFIED:-"false"}
 CLIP_VALUE=${CLIP_VALUE:-""}
@@ -134,7 +134,7 @@ echo "========================="
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-ADVANTAGE="grpo"
+ADVANTAGE="diversity_density_hybrid"
 
 echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"
@@ -143,8 +143,8 @@ echo "Advantage estimator: $ADVANTAGE"
 echo "====================================="
 
 # Set K value
-K=3
-MAX_PROMPT_LENGTH=512
+K=4
+MAX_PROMPT_LENGTH=1024
 MAX_RESPONSE_LENGTH=$((1024 * $K))
 # Pre-calculate required values to avoid type errors - use arithmetic expansion to ensure numerical type
 MAX_TOKEN_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
@@ -156,8 +156,8 @@ else
 fi
 
 # Set EPISODE
-EPISODE=6
-DATA_TRAIN_BATCH_SIZE=32
+EPISODE=30
+DATA_TRAIN_BATCH_SIZE=8
 N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
@@ -212,10 +212,12 @@ if [ "$RAW_TASK" = "math_train" ]; then
   EXPERIMENT="${EXPERIMENT}-MATH_TRAIN"
 elif [ "$TASK" = "AIME-TTT" ]; then
   WANDB_PROJECT="TTRL-AIME24"
+elif  "$TASK" = "AMC-TTT" ]; then
+  WANDB_PROJECT="TTRL-AMC"
 else
   WANDB_PROJECT="TTRL-MATH500"
 fi
-TIME_TAG=$(date +%H%M%S)
+
 
 if [ "$CLIP_HIGH" = "true" ]; then
   EXPERIMENT="${EXPERIMENT}-ClipHigh"
@@ -226,7 +228,7 @@ EXPERIMENT="${EXPERIMENT}-Ent${ENTROPY_COEFF}"
 
 
 LOG_NAME="${EXPERIMENT}-${MODEL}"
-OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}/${TIME_TAG}"
+OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}"
 
 
 
@@ -245,6 +247,11 @@ echo "Entropy coefficient: $ENTROPY_COEFF"
 echo "Output directory: $OUTPUT_DIR"
 echo "Experiment name: $LOG_NAME"
 echo "==============================="
+
+  # reward_model.reward_manager=diversity_ttrl \
+  # reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  # reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
+  # reward_model.reward_kwargs.mode="train" \
 
 # # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \

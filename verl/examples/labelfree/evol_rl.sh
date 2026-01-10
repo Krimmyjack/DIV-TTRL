@@ -387,7 +387,7 @@ TARGET_MODEL_NAME="${MODEL}-${EXPERIMENT}"
 TARGET_DIR="models/${TARGET_MODEL_NAME}"
 # Remove slashes from model name when uploading to HF
 SANITIZED_TARGET_MODEL_NAME="${TARGET_MODEL_NAME//\//-}"
-HF_UPLOAD_PATH="username/${SANITIZED_TARGET_MODEL_NAME}"
+HF_UPLOAD_PATH="Krimmy/${SANITIZED_TARGET_MODEL_NAME}"
 
 echo "Model merge configuration:"
 echo "  - Local directory: $ACTOR_DIR"

@@ -81,6 +81,9 @@ class AdvantageEstimator(str, Enum):
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
     RLOO = "rloo"
+    DIVERSITY_DENSITY = "diversity_density"
+    DIVERSITY_DENSITY_HYBRID = "diversity_density_hybrid"
+    PASS_GRPO = "pass_grpo"
 
 
 @dataclass
@@ -186,10 +189,39 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1):
+def compute_advantage(
+    data: DataProto,
+    adv_estimator,
+    gamma=1.0,
+    lam=1.0,
+    num_repeat=1,
+    diversity_density_config: dict = None
+):
+    """
+    Compute advantage for different estimators.
+    
+    For DIVERSITY_DENSITY_HYBRID, the function implements probability-based selection:
+    - With probability p (self-consistency rate): use diversity density advantage
+    - With probability (1-p): use fallback estimator (default: GRPO)
+    
+    Args:
+        data: DataProto containing batch data
+        adv_estimator: AdvantageEstimator enum value
+        gamma: Discount factor for GAE/REINFORCE++
+        lam: Lambda for GAE
+        num_repeat: Number of repeats
+        diversity_density_config: Config dict for diversity density estimator, containing:
+            - fallback_estimator: str, e.g., "grpo", "rloo"
+            - k: int, group size (typically n_votes_per_prompt)
+            - consistency_threshold: float, threshold above which to use diversity density
+    
+    Returns:
+        data: DataProto with advantages and returns added
+    """
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
+    
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == AdvantageEstimator.GAE:
@@ -241,6 +273,126 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=data.batch["response_mask"],
             index=data.non_tensor_batch["uid"],
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.DIVERSITY_DENSITY:
+        # Pure diversity density advantage
+        if diversity_density_config is None:
+            diversity_density_config = {}
+        
+        k = diversity_density_config.get("k", 8)
+        
+        # Need answer_types from non_tensor_batch
+        if "answer_types" not in data.non_tensor_batch:
+            raise ValueError("DIVERSITY_DENSITY requires 'answer_types' in data.non_tensor_batch")
+        
+        advantages, returns = core_algos.compute_diversity_density_advantage_from_prompts(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            answer_types=data.non_tensor_batch["answer_types"],
+            k=k,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.DIVERSITY_DENSITY_HYBRID:
+        # Hybrid mode: probabilistically select between diversity density and fallback
+        if diversity_density_config is None:
+            diversity_density_config = {}
+        
+        k = diversity_density_config.get("k", 8)
+        fallback = diversity_density_config.get("fallback_estimator", "pass_grpo")
+        
+        # Get self-consistency rate per prompt from non_tensor_batch
+        # This should be passed in by the reward manager
+        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+        answer_types = data.non_tensor_batch.get("answer_types", None)
+        
+        if consistency_rates is None or answer_types is None:
+            # Fallback to standard estimator if missing data
+            fallback_estimator = AdvantageEstimator(fallback)
+            return compute_advantage(data, fallback_estimator, gamma, lam, num_repeat)
+        
+        # Compute both advantages
+        # 1. Diversity density advantage
+        div_advantages, div_returns = core_algos.compute_diversity_density_advantage_from_prompts(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            answer_types=answer_types,
+            k=k,
+        )
+        
+        # 2. Fallback advantage (e.g., GRPO)
+        if fallback == "grpo":
+            fallback_advantages, fallback_returns = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=data.batch["response_mask"],
+                index=data.non_tensor_batch["uid"],
+            )
+        elif fallback == "pass_grpo":
+            fallback_advantages, fallback_returns = core_algos.compute_pass_grpo_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=data.batch["response_mask"],
+                index=data.non_tensor_batch["uid"],
+                answer_types=answer_types,
+                k=k,
+            ) 
+        elif fallback == "rloo":
+            fallback_advantages, fallback_returns = core_algos.compute_rloo_outcome_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=data.batch["response_mask"],
+                index=data.non_tensor_batch["uid"],
+            )
+        else:
+            # Default to GRPO
+            fallback_advantages, fallback_returns = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=data.batch["response_mask"],
+                index=data.non_tensor_batch["uid"],
+            )
+        
+        # 3. Probabilistic selection per sample based on consistency rate
+        # p = consistency_rate: probability of using diversity density
+        # Sample from Bernoulli(p) for each sample
+        bs = data.batch["token_level_rewards"].shape[0]
+        device = data.batch["token_level_rewards"].device
+        dtype = data.batch["token_level_rewards"].dtype
+        
+        # Convert consistency_rates to tensor
+        p = torch.tensor(consistency_rates, dtype=dtype, device=device)  # (bs,)
+        
+        # Sample: use_diversity[i] = 1 if random < p[i], else 0
+        random_vals = torch.rand(bs, device=device, dtype=dtype)
+        use_diversity = (random_vals < p).float().unsqueeze(-1)  # (bs, 1)
+        
+        # Blend advantages
+        advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
+        returns = use_diversity * div_returns + (1 - use_diversity) * fallback_returns
+        
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        
+        # NOTE: Do not store metrics in non_tensor_batch as scalars (must be numpy arrays)
+        # Metrics about diversity_density_usage_ratio can be logged separately if needed
+    elif adv_estimator == AdvantageEstimator.PASS_GRPO:
+        # Pass@k reweighted GRPO advantage
+        if diversity_density_config is None:
+            diversity_density_config = {}
+        
+        k = diversity_density_config.get("k", 8)
+        
+        # Need answer_types from non_tensor_batch
+        if "answer_types" not in data.non_tensor_batch:
+            raise ValueError("PASS_GRPO requires 'answer_types' in data.non_tensor_batch")
+        
+        advantages, returns = core_algos.compute_pass_grpo_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            answer_types=data.non_tensor_batch["answer_types"],
+            k=k,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -310,6 +462,9 @@ class RayPPOTrainer:
             AdvantageEstimator.REMAX,
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
+            AdvantageEstimator.DIVERSITY_DENSITY,
+            AdvantageEstimator.DIVERSITY_DENSITY_HYBRID,
+            AdvantageEstimator.PASS_GRPO,
         ]:
             self.use_critic = False
         else:
@@ -1060,6 +1215,12 @@ class RayPPOTrainer:
                                 )
                                 metrics.update({"train/post_entropy": post_entropy_loss.detach().item()})
                                 
+                                # === NEW: Store answer_types and consistency_rate for diversity density advantage ===
+                                if "_answer_types" in ttrl_metrics:
+                                    batch.non_tensor_batch["answer_types"] = ttrl_metrics["_answer_types"]
+                                if "_consistency_rate" in ttrl_metrics:
+                                    batch.non_tensor_batch["consistency_rate"] = ttrl_metrics["_consistency_rate"]
+                                
                         except Exception as e:
                             print(f"Error in reward_fn: {e}")
                             reward_tensor = self.reward_fn(batch)
@@ -1084,13 +1245,31 @@ class RayPPOTrainer:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
                         # compute advantages, executed on the driver process
+                        # Prepare diversity density config if using hybrid estimator
+                        diversity_density_config = None
+                        if self.config.algorithm.adv_estimator in [
+                            AdvantageEstimator.DIVERSITY_DENSITY,
+                            AdvantageEstimator.DIVERSITY_DENSITY_HYBRID
+                        ]:
+                            diversity_density_config = {
+                                "k": getattr(self, "n_votes_per_prompt", 8),
+                                "fallback_estimator": getattr(
+                                    self.config.algorithm, "diversity_density_fallback", "grpo"
+                                ),
+                            }
+                        
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
+                            diversity_density_config=diversity_density_config,
                         )
+                        
+                        # Log diversity density usage ratio if available
+                        if "diversity_density_usage_ratio" in batch.non_tensor_batch:
+                            metrics["train/diversity_density_usage_ratio"] = batch.non_tensor_batch["diversity_density_usage_ratio"]
 
                     # update critic
                     if self.use_critic:
