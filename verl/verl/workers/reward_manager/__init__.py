@@ -16,6 +16,7 @@ from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
+from .diversity_reward import DiversityTTRLRewardManager
 from .ttrl import TTRLRewardManager
 from .semantic_novelty import SemanticTTRLRewardManager
 

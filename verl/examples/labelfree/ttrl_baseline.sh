@@ -97,7 +97,7 @@ done
 
 # Set default values
 TASK=${TASK:-"AIME"}
-BACKBONE=${BACKBONE:-"Qwen3-4B-Base"}
+BACKBONE=${BACKBONE:-"Qwen2.5-Math-1.5B"}
 CLIP_HIGH=${CLIP_HIGH:-"false"}
 CLIP_SPECIFIED=${CLIP_SPECIFIED:-"false"}
 CLIP_VALUE=${CLIP_VALUE:-""}
@@ -125,7 +125,7 @@ echo "Backbone model: $BACKBONE"
 echo "==============================="
 
 # Set K value
-K=12
+K=3
 MAX_PROMPT_LENGTH=1024
 MAX_RESPONSE_LENGTH=$((1024 * $K))
 # Pre-calculate required values to avoid type errors - use arithmetic expansion to ensure numerical type
@@ -149,7 +149,7 @@ else
 fi
 
 # Set EPISODE
-EPISODE=3
+EPISODE=10
 DATA_TRAIN_BATCH_SIZE=8
 N_VOTES_PER_PROMPT=64
 N_SAMPLES_PER_PROMPT=32
@@ -162,7 +162,7 @@ if [[ "$BACKBONE" == *"/"* ]]; then
   BACKBONE_PATH="$BACKBONE"
   BACKBONE_NAME="${BACKBONE##*/}"
 else
-  BACKBONE_PATH="Qwen/${BACKBONE}"
+  BACKBONE_PATH="/root/autodl-tmp/model/${BACKBONE}"
   BACKBONE_NAME="$BACKBONE"
 fi
 
@@ -210,8 +210,8 @@ python -m verl.trainer.main_ppo \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   reward_model.reward_kwargs.mode="train" \
-  data.train_files=["$DATA_LOCAL_DIR/$TASK/$TRAIN_FILES"] \
-  data.val_files=["$DATA_LOCAL_DIR/AIME-TTT/test-simplerl.parquet","$DATA_LOCAL_DIR/MATH-TTT/test-simplerl.parquet","$DATA_LOCAL_DIR/AIME25/test-simplerl.parquet","$DATA_LOCAL_DIR/GPQA-TTT/test-simplerl.parquet"] \
+  data.train_files=["$DATA_LOCAL_DIR/$TASK/train-simplerl.parquet"] \
+  data.val_files=["$DATA_LOCAL_DIR/$TASK/test-simplerl.parquet"] \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
   data.max_response_length=$MAX_RESPONSE_LENGTH \
   data.train_batch_size=$DATA_TRAIN_BATCH_SIZE \
@@ -239,14 +239,13 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
   actor_rollout_ref.rollout.do_vote=True \
   actor_rollout_ref.rollout.n_vote=$N_VOTES_PER_PROMPT \
   actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \
-  actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-  actor_rollout_ref.rollout.val_kwargs.n=$N \
-  actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-  actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
+  actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+  actor_rollout_ref.rollout.val_kwargs.top_p=0 \
+  actor_rollout_ref.rollout.val_kwargs.temperature=0 \
   actor_rollout_ref.rollout.max_model_len=$((MAX_TOKEN_LEN)) \
   actor_rollout_ref.rollout.max_num_batched_tokens=$((MAX_TOKEN_LEN2)) \
   critic.optim.lr=9e-6 \

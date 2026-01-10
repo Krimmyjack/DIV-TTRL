@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# === Semantic Novelty TTRL Training Script ===
-# Usage: ./evol_rl.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
+# === TTRL Training Script ===
+# Usage: ./evol_rl_no_embedding.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
 #
 # Parameters:
 #   --task      Task name (default: AIME-TTT)
@@ -19,13 +19,12 @@
 #   -h, --help  Show help information
 #
 # Examples:
-#   ./evol_rl.sh                                    # Use default parameters
-#   ./evol_rl.sh --task MATH                   # Specify task
-#   ./evol_rl.sh --task AIME --backbone Qwen3-4B-Base  # Specify task and model
-#   ./evol_rl.sh --clip-high                       # High clip ratio mode
-#   ./evol_rl.sh --temp 0.8                        # Set temperature parameter
+#   ./evol_rl_no_embedding.sh                                    # Use default parameters
+#   ./evol_rl_no_embedding.sh --task MATH                   # Specify task
+#   ./evol_rl_no_embedding.sh --task AIME --backbone Qwen3-4B-Base  # Specify task and model
+#   ./evol_rl_no_embedding.sh --clip-high                       # High clip ratio mode
+#   ./evol_rl_no_embedding.sh --temp 0.8                        # Set temperature parameter
 #
-# Note: This script uses semantic novelty functionality, requires starting local vLLM embedding service
 # =======================
 
 #export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -99,9 +98,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set default values
-TASK=${TASK:-"AIME"}
+    TASK=${TASK:-"AMC"}
 BACKBONE=${BACKBONE:-"Qwen3-4B-Base"}
-CLIP_HIGH=${CLIP_HIGH:-"false"}
+CLIP_HIGH=${CLIP_HIGH:-"true"}
 CLIP_SPECIFIED=${CLIP_SPECIFIED:-"false"}
 CLIP_VALUE=${CLIP_VALUE:-""}
 CLIP_MODE=${CLIP_MODE:-""}
@@ -121,20 +120,6 @@ else
   TASK="$TASK-TTT"
 fi
 
-# === Using Remote vLLM Embedding API ===
-# Remote vLLM API configuration
-export VLLM_API_URL=""
-export VLLM_MODEL_NAME="Qwen/Qwen3-Embedding-4B"
-
-# Check remote vLLM API configuration
-if [ -z "$VLLM_API_URL" ] || [ -z "$VLLM_MODEL_NAME" ]; then
-    echo "❌ Error: Please set remote vLLM API configuration first"
-    echo "Please check the following environment variables:"
-    echo "- VLLM_API_URL"
-    echo "- VLLM_MODEL_NAME"
-    exit 1
-fi
-
 pkill -f "python.*main_ppo" || true
 pkill -f "python.*main_dapo" || true
 pkill -f "multiprocessing.spawn" || true
@@ -149,7 +134,7 @@ echo "========================="
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-ADVANTAGE="grpo"
+ADVANTAGE="diversity_density_hybrid"
 
 echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"
@@ -158,8 +143,8 @@ echo "Advantage estimator: $ADVANTAGE"
 echo "====================================="
 
 # Set K value
-K=12
-MAX_PROMPT_LENGTH=512
+K=4
+MAX_PROMPT_LENGTH=1024
 MAX_RESPONSE_LENGTH=$((1024 * $K))
 # Pre-calculate required values to avoid type errors - use arithmetic expansion to ensure numerical type
 MAX_TOKEN_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
@@ -171,8 +156,8 @@ else
 fi
 
 # Set EPISODE
-EPISODE=3
-DATA_TRAIN_BATCH_SIZE=8
+EPISODE=14
+DATA_TRAIN_BATCH_SIZE=16
 N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
@@ -185,7 +170,7 @@ if [[ "$BACKBONE" == *"/"* ]]; then
   BACKBONE_PATH="$BACKBONE"
   BACKBONE_NAME="${BACKBONE##*/}"
 else
-  BACKBONE_PATH="Qwen/${BACKBONE}"
+  BACKBONE_PATH="/root/autodl-tmp/model/${BACKBONE}"
   BACKBONE_NAME="$BACKBONE"
 fi
 
@@ -194,11 +179,7 @@ echo "Parsed model name: $BACKBONE_NAME"
 
 MODEL="${TASK}-${BACKBONE_NAME}"
 
-# === Semantic Novelty Parameter Configuration ===
-USE_SEMANTIC_NOVELTY=true  # Enable semantic novelty
-EMBEDDING_DIM=2560  # Modified to local vLLM model dimension
-
-EXPERIMENT="EVOL-RL"
+EXPERIMENT="diversity-RL"
 
 # Set clip_ratio_high value and experiment name suffix
 if [ "$CLIP_SPECIFIED" = "true" ]; then
@@ -225,19 +206,14 @@ else
   fi
 fi
 
-# === Remote vLLM API Parameters ===
-VLLM_API_URL_VAR="$VLLM_API_URL"  # Remote vLLM API address
-VLLM_MODEL_NAME_VAR="$VLLM_MODEL_NAME"  # Remote vLLM model name
-
-MAX_RETRIES=5
-RETRY_DELAY=2.0
-
 # Set WANDB_PROJECT based on TASK
 if [ "$RAW_TASK" = "math_train" ]; then
   WANDB_PROJECT="TTRL_MATH_TRAIN"
   EXPERIMENT="${EXPERIMENT}-MATH_TRAIN"
 elif [ "$TASK" = "AIME-TTT" ]; then
   WANDB_PROJECT="TTRL-AIME24"
+elif  "$TASK" = "AMC-TTT" ]; then
+  WANDB_PROJECT="TTRL-AMC"
 else
   WANDB_PROJECT="TTRL-MATH500"
 fi
@@ -256,14 +232,10 @@ OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}"
 
 
 
-echo "=== Semantic Novelty TTRL Training Configuration ==="
+echo "=== TTRL Training Configuration ==="
 echo "Task: $TASK"
 echo "Backbone model: $BACKBONE"
 echo "Advantage estimator: $ADVANTAGE"
-echo "Use semantic novelty: $USE_SEMANTIC_NOVELTY"
-echo "Remote vLLM API address: $VLLM_API_URL_VAR"
-echo "Remote vLLM model name: $VLLM_MODEL_NAME_VAR"
-echo "Embedding dimension: $EMBEDDING_DIM"
 # Print entropy regularization switch (based on whether coefficient is 0)
 if [[ "$ENTROPY_COEFF" != "0" && "$ENTROPY_COEFF" != "0.0" && "$ENTROPY_COEFF" != "0.00" && "$ENTROPY_COEFF" != "0.000" ]]; then
   ENT_ENABLED="true"
@@ -276,20 +248,19 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Experiment name: $LOG_NAME"
 echo "==============================="
 
-# ------------------------------------------------------------
+  # reward_model.reward_manager=diversity_ttrl \
+  # reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  # reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
+  # reward_model.reward_kwargs.mode="train" \
+
+# # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
-  reward_model.reward_manager=semantic_ttrl \
+  reward_model.reward_manager=diversity_ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   reward_model.reward_kwargs.mode="train" \
-  +reward_model.reward_kwargs.use_semantic_novelty=$USE_SEMANTIC_NOVELTY \
-  +reward_model.reward_kwargs.embedding_dim=$EMBEDDING_DIM \
-  +reward_model.reward_kwargs.vllm_api_url=$VLLM_API_URL_VAR \
-  +reward_model.reward_kwargs.vllm_model_name=$VLLM_MODEL_NAME_VAR \
-  +reward_model.reward_kwargs.max_retries=$MAX_RETRIES \
-  +reward_model.reward_kwargs.retry_delay=$RETRY_DELAY \
-  data.train_files=["$DATA_LOCAL_DIR/$TASK/$TRAIN_FILES"] \
-  data.val_files=["$DATA_LOCAL_DIR/AIME-TTT/test-simplerl.parquet","$DATA_LOCAL_DIR/MATH-TTT/test-simplerl.parquet","$DATA_LOCAL_DIR/AIME25/test-simplerl.parquet","$DATA_LOCAL_DIR/GPQA-TTT/test-simplerl.parquet"] \
+  data.train_files=["$DATA_LOCAL_DIR/$TASK/train-simplerl.parquet"] \
+  data.val_files=["$DATA_LOCAL_DIR/$TASK/test-simplerl.parquet"] \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
   data.max_response_length=$MAX_RESPONSE_LENGTH \
   data.train_batch_size=$DATA_TRAIN_BATCH_SIZE \
@@ -318,14 +289,13 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
   actor_rollout_ref.rollout.do_vote=True \
   actor_rollout_ref.rollout.n_vote=$N_VOTES_PER_PROMPT \
   actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \
-  actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-  actor_rollout_ref.rollout.val_kwargs.n=$N \
-  actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-  actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
+  actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+  actor_rollout_ref.rollout.val_kwargs.top_p=0 \
+  actor_rollout_ref.rollout.val_kwargs.temperature=0 \
   actor_rollout_ref.rollout.max_model_len=$((MAX_TOKEN_LEN)) \
   actor_rollout_ref.rollout.max_num_batched_tokens=$((MAX_TOKEN_LEN2)) \
   critic.optim.lr=9e-6 \
@@ -342,10 +312,10 @@ python -m verl.trainer.main_ppo \
   trainer.experiment_name=$LOG_NAME \
   trainer.n_gpus_per_node=8 \
   trainer.nnodes=1 \
-  trainer.save_freq=60 \
+  trainer.save_freq=15 \
   trainer.test_freq=5 \
-  trainer.max_actor_ckpt_to_keep=1 \
-  trainer.max_critic_ckpt_to_keep=1 \
+  trainer.max_actor_ckpt_to_keep=0 \
+  trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_epochs=$EPISODE "$@"
 
@@ -353,7 +323,7 @@ echo "=== Training Completed ==="
 echo "Output directory: $OUTPUT_DIR"
 echo "Project name: $WANDB_PROJECT"
 echo "Experiment name: $LOG_NAME"
-echo "========================"
+# echo "========================"
 
 # === Automatic Evaluation Module ===
 echo ""
@@ -384,21 +354,21 @@ HF_MODEL_PATH="$BACKBONE_PATH"
 
 # Build target directory name
 TARGET_MODEL_NAME="${MODEL}-${EXPERIMENT}"
-TARGET_DIR="models/${TARGET_MODEL_NAME}"
+TARGET_DIR="/root/autodl-tmp/model/${TARGET_MODEL_NAME}"
 # Remove slashes from model name when uploading to HF
 SANITIZED_TARGET_MODEL_NAME="${TARGET_MODEL_NAME//\//-}"
-HF_UPLOAD_PATH="Krimmy/${SANITIZED_TARGET_MODEL_NAME}"
+HF_UPLOAD_PATH="Qwen/${SANITIZED_TARGET_MODEL_NAME}"
 
 echo "Model merge configuration:"
 echo "  - Local directory: $ACTOR_DIR"
-echo "  - HF model path: $HF_MODEL_PATH"
+# echo "  - HF model path: $HF_MODEL_PATH"
 echo "  - Target directory: $TARGET_DIR"
 echo "  - HF upload path: $HF_UPLOAD_PATH"
 
 # 3. Execute model merge
 echo ""
 echo "🔄 Starting model merge..."
-python -m scripts.model_merger \
+python /root/autodl-tmp/EVOL-RL/verl/scripts/model_merger.py \
     --backend fsdp \
     --local_dir "$ACTOR_DIR" \
     --hf_model_path "$HF_MODEL_PATH" \
@@ -432,8 +402,16 @@ echo "Evaluating model: $TARGET_DIR"
 
 if [ $? -eq 0 ]; then
     echo "✅ Automatic evaluation completed"
+    echo ""
+    echo "========================================="
+    echo "🚀 All tasks completed successfully!"
+    echo "💾 Logs have been saved"
+    echo "🛑 System will shutdown in 60 seconds..."
+    echo "========================================="
+    # 等待60秒再关机，给用户时间保存日志或取消
+    sleep 60
+    /usr/bin/shutdown -h now
 else
     echo "❌ Automatic evaluation failed"
     exit 1
 fi
-
