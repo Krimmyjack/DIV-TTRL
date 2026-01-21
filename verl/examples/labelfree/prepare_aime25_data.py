@@ -14,25 +14,8 @@ Then converts them to the JSON format required by preprocess_simplerl.py
 import argparse
 import json
 import os
-import re
 from datasets import load_dataset
 
-
-def extract_boxed_answer(solution: str) -> str:
-    """Extract answer from \\boxed{...} in solution string."""
-    # Handle nested braces
-    pattern = r'\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}'
-    matches = re.findall(pattern, solution)
-    if matches:
-        return matches[-1].strip()  # Return the last boxed answer
-    
-    # Fallback: try simpler pattern
-    simple_pattern = r'\\boxed\{([^}]+)\}'
-    simple_matches = re.findall(simple_pattern, solution)
-    if simple_matches:
-        return simple_matches[-1].strip()
-    
-    return ""
 
 
 def build_aimo_validation_aime_dataset():
@@ -45,11 +28,7 @@ def build_aimo_validation_aime_dataset():
     result = []
     for idx, example in enumerate(dataset):
         problem = example["problem"]
-        solution = example["solution"]
-        answer = extract_boxed_answer(solution)
-        
-        if not answer:
-            print(f"Warning: Could not extract answer from example {idx}, using empty string")
+        answer = str(example["answer"])  # 直接使用 answer 字段
         
         result.append({
             "prompt": problem,
@@ -67,7 +46,7 @@ def build_aime25_dataset():
     data_source = "math-ai/aime25"
     print(f"Loading {data_source} from HuggingFace...")
     
-    dataset = load_dataset(data_source, split="train")
+    dataset = load_dataset(data_source, split="test")
     
     result = []
     for idx, example in enumerate(dataset):
