@@ -102,6 +102,7 @@ else:
 - **AIME-TTT**: AIME 2024 竞赛题
 - **AMC-TTT**: AMC 竞赛题
 - **MATH-TTT**: MATH-500 测试集
+- **AIME25-TTT**: 训练集是 AIME 2022-2024 竞赛题，测试集是AIME 2025 竞赛题
 
 ## 🤖 支持的模型
 
