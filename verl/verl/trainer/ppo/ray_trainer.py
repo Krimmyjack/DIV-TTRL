@@ -365,7 +365,7 @@ def compute_advantage(
         
         # Sample: use_diversity[i] = 1 if random < p[i], else 0
         random_vals = torch.rand(bs, device=device, dtype=dtype)
-        use_diversity = (random_vals < p).float().unsqueeze(-1)  # (bs, 1)
+        use_diversity = (random_vals > p).float().unsqueeze(-1)  # (bs, 1)
         
         # Blend advantages
         advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
