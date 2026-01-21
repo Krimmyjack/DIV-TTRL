@@ -1,5 +1,7 @@
 #!/bin/bash
-
+"""
+bash examples/labelfree/math.sh --task math_train --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+"""
 # === TTRL Training Script ===
 # Usage: ./evol_rl_no_embedding.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
 #
