@@ -2,6 +2,7 @@
 """
 bash examples/labelfree/math.sh --task math_train --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 """
+export WANDB_ENTITY=2691454060-ucla
 # === TTRL Training Script ===
 # Usage: ./evol_rl_no_embedding.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
 #

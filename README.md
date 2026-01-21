@@ -1,56 +1,37 @@
-# 🧬 EVOL-RL: Evolving Language Models without Labels: Majority Drives Selection, Novelty Promotes Variation
+# 🎯 DIV-TTRL: Diversity-Enhanced Test-Time Reinforcement Learning
 
 ## 🧭 Overview
 
-This repository contains the official implementation for EVOL-RL, a new framework enabling Large Language Models (LLMs) to self-improve on unlabeled data without performance degradation.
+DIV-TTRL 是一个基于多样性增强的测试时强化学习框架，用于在无标签数据上提升大语言模型的数学推理能力。
 
-![Illustration of entropy collapse in TTRL and EVOL-RL jumping out of the collapse](assets/Figure1.png)
+### 🔑 核心创新
 
-## 📚 Resources
+- **多样性密度优势 (Diversity Density Advantage)**: 基于超几何分布的优势估计，保护少数派答案
+- **Pass@k 重加权 GRPO**: 基于 pass@k 概率的优势重加权机制
+- **混合优势估计 (Hybrid Advantage)**: 根据自洽性动态选择优势计算方法
+  - 高自洽性 → Pass@k GRPO 或 Pass@1 GRPO (信任多数投票)
+  - 低自洽性 → Diversity Density (鼓励探索)
 
-- 📄 Paper: [arXiv 2509.15194](https://arxiv.org/abs/2509.15194)  
-- 🤗 Models Collection: [EVOL-RL on Hugging Face](https://huggingface.co/collections/yujunzhou/evol-rl-68d8f3f7e2fadab49d6c3b9b)
-
-
-### 🧠 The Problem & Our Solution
-
-Current label-free methods like Test-Time Reinforcement Learning (TTRL) suffer from a critical failure mode we identify as "Cognitive Collapse." Optimizing solely for self-consensus traps the model in a degenerative loop, causing a decline in solution diversity (pass@n), reasoning complexity, and out-of-domain generalization.
-
-Inspired by biological evolution, EVOL-RL solves this by redesigning the learning objective to balance two fundamental forces:
-
-- Selection (Stability): Retaining the majority-voted answer as a stabilizing signal.
-
-- Variation (Exploration): Introducing a novelty-aware reward to incentivize semantically different reasoning paths.
-
-This "majority-for-stability, novelty-for-exploration" design successfully averts cognitive collapse, fostering a healthy equilibrium between refining known solutions and discovering new ones.
-
-### 📈 Key Results
-
-Our experiments on Qwen3-4B-Base and Qwen3-8B-Base models show that EVOL-RL consistently outperforms consensus-only baselines. It prevents all symptoms of collapse and yields significant generalization gains. For instance, after training on AIME24, EVOL-RL boosts the Qwen3-4B-Base model's pass@1 accuracy on the unseen AIME25 benchmark from 4.6% (TTRL) to 16.4% and more than doubles its pass@16 accuracy from 18.5% to 37.9%.
-
-This repository provides the necessary code to replicate our findings and apply the EVOL-RL framework to your own models.
-
-More results can be found in the following figure and table:
-
-![Results](assets/Figure2.jpg)
-
-## 📁 Project Structure
+## 📁 项目结构
 
 ```
-EVOL-RL/
-└── verl/          # VERL framework implementation
-    ├── examples/   # Example scripts and configurations
-    ├── data/       # Datasets (AIME, MATH, GPQA, etc.)
-    ├── docs/       # Documentation
-    ├── tests/      # Test suites
-    └── ...
+DIV-TTRL/
+└── verl/
+    ├── examples/labelfree/      # 训练脚本
+    │   ├── math.sh              # 主训练脚本
+    │   └── ttrl_baseline.sh     # TTRL baseline
+    ├── verl/
+    │   ├── trainer/ppo/
+    │   │   ├── ray_trainer.py   # 训练器 (含优势估计逻辑)
+    │   │   └── core_algos.py    # 核心算法 (GRPO, Diversity Density)
+    │   └── workers/reward_manager/
+    │       └── diversity_reward.py  # 多样性奖励管理器
+    └── data/                    # 数据集
 ```
 
-## 🚀 Quickstart Guide
+## 🚀 快速开始
 
-### 1. 📦 Installation
-
-First, navigate to the verl directory and install the package:
+### 1. 安装
 
 ```bash
 cd verl
@@ -59,130 +40,74 @@ pip install antlr4-python3-runtime==4.9.3
 pip install numpy==1.26.4
 ```
 
-To prepare the dataset, run:  
-```bash 
-cd data  
-python preprocess_simplerl.py  
-```
-
-### 2. 🎯 TTRL Baseline Training and Testing
-
-For TTRL baseline, you can directly run training and testing on the MATH Training Set:
+### 2. 准备数据
 
 ```bash
-sh examples/labelfree/ttrl_baseline.sh --task math_train
+cd data
+python preprocess_simplerl.py
 ```
 
-This will train and test the TTRL baseline model on the MATH Training dataset.
-
-### 3. 🧬 EVOL-RL Training and Testing
-
-For EVOL-RL, you need to first deploy the vLLM embedding API service.
-
-#### 3.1 🔧 Deploy vLLM Embedding API
-
-Deploy the vLLM embedding service:
+### 3. 训练
 
 ```bash
-# Deploy in foreground (for testing)
-# sh deploy_vllm_embedding.sh
+# DIV-TTRL 训练 (使用多样性密度混合优势)
+bash examples/labelfree/math.sh \
+    --task math_train \
+    --backbone /path/to/Qwen3-4B-Base \
+    --clip-high \
+    --ent 0.003
 
-# Deploy in background (for production)
-sh deploy_vllm_embedding.sh start-daemon
+# TTRL Baseline
+bash examples/labelfree/ttrl_baseline.sh --task math_train
 ```
 
-**What the script does:**
-- Check CUDA environment and GPU availability
-- Install required dependencies (vLLM, FastAPI, etc.)
-- Download the Qwen3-Embedding-4B model (~8GB)
-- Start the vLLM embedding service on port 2341
-- Set up proper environment variables
+## ⚙️ 关键参数
 
-**Background deployment details:**
-- Service runs in background with logs written to `vllm_service.log`
-- Use `sh deploy_vllm_embedding.sh stop` to stop the service
-- Use `sh deploy_vllm_embedding.sh show-commands` to see client commands
-- Use `sh deploy_vllm_embedding.sh test` to test local service
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--task` | `AMC` | 训练任务 (math_train, AIME, AMC) |
+| `--backbone` | `Qwen3-4B-Base` | 基座模型路径 |
+| `--clip-high` | 0.28 | 高 PPO clip ratio |
+| `--ent` | 0.000 | 熵正则化系数 |
+| `--temp` | 1.0 | 生成温度 |
 
-#### 3.2 ✅ Verify API Deployment
+## 📊 奖励系统设计
 
-Test if the API is working:
+### 三阶段流程
 
-```bash
-curl -X POST http://localhost:2341/embed \
-  -H "Content-Type: application/json" \
-  -d '{"texts": ["Hello world"]}'
+```
+1. Base Reward (多数投票)
+   ↓
+2. Diversity Adjustment (多样性调整) 
+   ↓  
+3. Advantage Estimation (优势估计)
+   - Diversity Density: 基于答案类型分布
+   - Pass@k GRPO: 基于多数投票奖励
 ```
 
-#### 3.3 ⚙️ Configure API Address
+### 混合优势公式
 
-**For local deployment:**
-Edit the API address in `examples/labelfree/evol_rl.sh` at line 126:
+```
+p = 自洽性比率 (majority_count / total_samples)
 
-```bash
-# Local server (if running on same machine)
-export VLLM_API_URL="http://localhost:2341"
+if random() > p:
+    advantage = diversity_density_advantage  # 低自洽性
+else:
+    advantage = pass_grpo_advantage          # 高自洽性
 ```
 
-**For remote deployment:**
-```bash
-# Remote server (replace with actual IP)
-export VLLM_API_URL="http://192.168.1.100:2341"
-```
+## 📈 支持的数据集
 
-**Verify configuration:**
-```bash
-# Test if the configured URL is accessible
-curl $VLLM_API_URL/health
+- **Math Training**: MATH 训练集
+- **AIME-TTT**: AIME 2024 竞赛题
+- **AMC-TTT**: AMC 竞赛题
+- **MATH-TTT**: MATH-500 测试集
 
-# Should return: {"status": "healthy", "model": "Qwen/Qwen3-Embedding-4B"}
-```
+## 🤖 支持的模型
 
-#### 3.4 🏃 Run EVOL-RL Training
+- Qwen3-4B-Base
+- Qwen3-8B-Base
 
-Run EVOL-RL training and testing:
+## 📝 License
 
-```bash
-sh examples/labelfree/evol_rl.sh --ent 0.003 --clip-high
-```
-
-### 4. 🧪 Standalone Testing
-
-For standalone testing, you can use the batch evaluation script:
-
-```bash
-# Test predefined datasets
-sh test_three_datasets.sh --batch_mode --set 1
-
-# Test a specific model and dataset
-sh test_three_datasets.sh --model_path /path/to/model --datasets AIME-TTT
-```
-
-## 📊 Available Benchmark Datasets
-
-- **AIME-TTT**: AIME 2024 problems
-- **MATH-TTT**: MATH-500 problems  
-- **AIME25**: AIME 2025 problems
-- **AMC-TTT**: AMC competition problems
-- **GPQA-TTT**: GPQA-Diamond problems
-
-## 🎯 Available Training Tasks
-
-- **AIME-TTT**: AIME 2024 competition problems 
-- **MATH-TTT**: MATH-500 dataset
-- **math_train**: MATH training set 
-
-## 🤖 Model Support
-
-- **Qwen3-4B-Base**
-- **Qwen3-8B-Base**
-
-## ✨ Citation
-
-```bibtex
-@article{zhou2025evolving,
-  title={Evolving Language Models without Labels: Majority Drives Selection, Novelty Promotes Variation},
-  author={Zhou, Yujun and Liang, Zhenwen and Liu, Haolin and Yu, Wenhao and Panaganti, Kishan and Song, Linfeng and Yu, Dian and Zhang, Xiangliang and Mi, Haitao and Yu, Dong},
-  journal={arXiv preprint arXiv:2509.15194},
-  year={2025}
-}
+Apache License 2.0

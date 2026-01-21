@@ -1,5 +1,9 @@
 #!/bin/bash
 """
+bash examples/labelfree/aime25_train.sh --task math_train --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+"""
+export WANDB_ENTITY=2691454060-ucla
+"""
 AIME25 Training Script
 Uses AI-MO/aimo-validation-aime as training set and math-ai/aime25 as test set.
 
