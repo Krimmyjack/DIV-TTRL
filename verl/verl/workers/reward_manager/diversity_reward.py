@@ -334,11 +334,13 @@ class DiversityTTRLRewardManager:
         all_ttrl_metrics = defaultdict(list)
         scores = [0.0 for _ in range(len(data))]
         
-        # === NEW: Collect answer_types and consistency_rate for diversity density advantage ===
+        # === NEW: Collect answer_types, consistency_rate, and accuracy_rate for diversity density advantage ===
         # answer_types: per-sample answer type id (hash of extracted answer)
         # consistency_rate: per-sample self-consistency rate (majority_ratio from this prompt group)
+        # accuracy_rate: per-sample accuracy rate (correct_count / total from this prompt group)
         all_answer_types = []
         all_consistency_rates = []
+        all_accuracy_rates = []
 
         for prompt_i in range(prompt_num):
             group_pred_outputs = []
@@ -391,6 +393,12 @@ class DiversityTTRLRewardManager:
             majority_num = max(freq.values()) if freq else 0
             consistency_rate = majority_num / self.n_votes_per_prompt if self.n_votes_per_prompt > 0 else 0.0
             
+            # ========== [2026-01-22 MODIFIED] ==========
+            # Use ground_truth_ratio from ttrl_metrics as accuracy rate
+            # instead of calculating from base_rewards
+            # =============================================
+            accuracy_rate = ttrl_metrics.get("ground_truth_ratio", 0.0)
+            
             # Create answer type mapping (hash of answer string -> integer id)
             answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
             
@@ -399,6 +407,8 @@ class DiversityTTRLRewardManager:
                 all_answer_types.append(answer_to_id[final_answers[i]])
                 # Store consistency rate (same for all samples in this prompt group)
                 all_consistency_rates.append(consistency_rate)
+                # Store accuracy rate (same for all samples in this prompt group)
+                all_accuracy_rates.append(accuracy_rate)
 
             for k, v in ttrl_metrics.items():
                 all_ttrl_metrics[k].append(v)
@@ -426,19 +436,22 @@ class DiversityTTRLRewardManager:
 
         data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=data.batch["prompts"].device)
         
-        # === NEW: Store answer_types and consistency_rate in non_tensor_batch for advantage computation ===
+        # === NEW: Store answer_types, consistency_rate, and accuracy_rate in non_tensor_batch for advantage computation ===
         # Only store for the samples that will be used in training (first n_samples_per_prompt per prompt)
         training_answer_types = []
         training_consistency_rates = []
+        training_accuracy_rates = []
         for prompt_i in range(prompt_num):
             for i in range(self.n_samples_per_prompt):
                 global_idx = prompt_i * self.n_votes_per_prompt + i
                 training_answer_types.append(all_answer_types[global_idx])
                 training_consistency_rates.append(all_consistency_rates[global_idx])
+                training_accuracy_rates.append(all_accuracy_rates[global_idx])
         
         # Store in ttrl_info for downstream use
         ttrl_info["_answer_types"] = np.array(training_answer_types)
         ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
+        ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
 
         print("\n=== TTRL Training Metrics Summary ===")
         for k, v in all_ttrl_metrics.items():
