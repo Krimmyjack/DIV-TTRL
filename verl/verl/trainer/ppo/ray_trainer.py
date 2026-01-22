@@ -398,9 +398,9 @@ def compute_advantage(
         num_total_prompts = len(unique_uids)
         diversity_usage_ratio = num_prompts_using_diversity / num_total_prompts if num_total_prompts > 0 else 0.0
         
-        # Store as numpy array (required by non_tensor_batch)
-        data.non_tensor_batch["diversity_density_ratio"] = np.array([diversity_usage_ratio])
-        data.non_tensor_batch["fallback_ratio"] = np.array([1.0 - diversity_usage_ratio])
+        # Store in meta_info (not non_tensor_batch, which requires matching batch size)
+        data.meta_info["diversity_density_ratio"] = diversity_usage_ratio
+        data.meta_info["fallback_ratio"] = 1.0 - diversity_usage_ratio
     elif adv_estimator == AdvantageEstimator.PASS_GRPO:
         # Pass@k reweighted GRPO advantage
         if diversity_density_config is None:
@@ -1295,10 +1295,10 @@ class RayPPOTrainer:
                         )
                         
                         # Log diversity density usage statistics if available
-                        if "diversity_density_ratio" in batch.non_tensor_batch:
-                            metrics["train/diversity_density_ratio"] = float(batch.non_tensor_batch["diversity_density_ratio"][0])
-                        if "fallback_ratio" in batch.non_tensor_batch:
-                            metrics["train/fallback_ratio"] = float(batch.non_tensor_batch["fallback_ratio"][0])
+                        if "diversity_density_ratio" in batch.meta_info:
+                            metrics["train/diversity_density_ratio"] = float(batch.meta_info["diversity_density_ratio"])
+                        if "fallback_ratio" in batch.meta_info:
+                            metrics["train/fallback_ratio"] = float(batch.meta_info["fallback_ratio"])
 
                     # update critic
                     if self.use_critic:
