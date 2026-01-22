@@ -353,18 +353,34 @@ def compute_advantage(
                 index=data.non_tensor_batch["uid"],
             )
         
-        # 3. Probabilistic selection per sample based on consistency rate
-        # p = consistency_rate: probability of using diversity density
+        # ========== [2026-01-22 MODIFIED] ==========
+        # Changed from consistency_rate to accuracy_rate (ground_truth_ratio)
+        # Changed from per-sample sampling to per-prompt sampling
+        # =============================================
+        
+        # 3. Probabilistic selection per sample based on accuracy rate (real reward correctness)
+        # p = accuracy_rate: probability of using fallback estimator
+        # When accuracy is high, prefer fallback; when accuracy is low, prefer diversity density
         # Sample from Bernoulli(p) for each sample
         bs = data.batch["token_level_rewards"].shape[0]
         device = data.batch["token_level_rewards"].device
         dtype = data.batch["token_level_rewards"].dtype
         
-        # Convert consistency_rates to tensor
-        p = torch.tensor(consistency_rates, dtype=dtype, device=device)  # (bs,)
+        # Use accuracy_rate if available, otherwise fallback to consistency_rate
+        accuracy_rates = data.non_tensor_batch.get("accuracy_rate", None)
+        if accuracy_rates is not None:
+            p = torch.tensor(accuracy_rates, dtype=dtype, device=device)  # (bs,)
+        else:
+            # Fallback to consistency_rate for backward compatibility
+            p = torch.tensor(consistency_rates, dtype=dtype, device=device)  # (bs,)
         
-        # Sample: use_diversity[i] = 1 if random < p[i], else 0
-        random_vals = torch.rand(bs, device=device, dtype=dtype)
+        # Sample: use_diversity[i] = 1 if random > p[i], else 0
+        # Use per-prompt sampling instead of per-sample sampling
+        # This ensures all samples from the same prompt use the same advantage calculation method
+        uids = data.non_tensor_batch["uid"]
+        unique_uids = list(dict.fromkeys(uids))  # Preserve order
+        uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
+        random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
         use_diversity = (random_vals > p).float().unsqueeze(-1)  # (bs, 1)
         
         # Blend advantages
@@ -374,8 +390,17 @@ def compute_advantage(
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
         
-        # NOTE: Do not store metrics in non_tensor_batch as scalars (must be numpy arrays)
-        # Metrics about diversity_density_usage_ratio can be logged separately if needed
+        # Calculate and store diversity density usage statistics for logging
+        # Per-prompt usage: check how many unique prompts used diversity density
+        uid_to_use_diversity = {uid: uid_to_random[uid] > p[list(uids).index(uid)].item() 
+                                for uid in unique_uids}
+        num_prompts_using_diversity = sum(1 for use in uid_to_use_diversity.values() if use)
+        num_total_prompts = len(unique_uids)
+        diversity_usage_ratio = num_prompts_using_diversity / num_total_prompts if num_total_prompts > 0 else 0.0
+        
+        # Store as numpy array (required by non_tensor_batch)
+        data.non_tensor_batch["diversity_density_ratio"] = np.array([diversity_usage_ratio])
+        data.non_tensor_batch["fallback_ratio"] = np.array([1.0 - diversity_usage_ratio])
     elif adv_estimator == AdvantageEstimator.PASS_GRPO:
         # Pass@k reweighted GRPO advantage
         if diversity_density_config is None:
@@ -1215,11 +1240,13 @@ class RayPPOTrainer:
                                 )
                                 metrics.update({"train/post_entropy": post_entropy_loss.detach().item()})
                                 
-                                # === NEW: Store answer_types and consistency_rate for diversity density advantage ===
+                                # === NEW: Store answer_types, consistency_rate, and accuracy_rate for diversity density advantage ===
                                 if "_answer_types" in ttrl_metrics:
                                     batch.non_tensor_batch["answer_types"] = ttrl_metrics["_answer_types"]
                                 if "_consistency_rate" in ttrl_metrics:
                                     batch.non_tensor_batch["consistency_rate"] = ttrl_metrics["_consistency_rate"]
+                                if "_accuracy_rate" in ttrl_metrics:
+                                    batch.non_tensor_batch["accuracy_rate"] = ttrl_metrics["_accuracy_rate"]
                                 
                         except Exception as e:
                             print(f"Error in reward_fn: {e}")
@@ -1267,9 +1294,11 @@ class RayPPOTrainer:
                             diversity_density_config=diversity_density_config,
                         )
                         
-                        # Log diversity density usage ratio if available
-                        if "diversity_density_usage_ratio" in batch.non_tensor_batch:
-                            metrics["train/diversity_density_usage_ratio"] = batch.non_tensor_batch["diversity_density_usage_ratio"]
+                        # Log diversity density usage statistics if available
+                        if "diversity_density_ratio" in batch.non_tensor_batch:
+                            metrics["train/diversity_density_ratio"] = float(batch.non_tensor_batch["diversity_density_ratio"][0])
+                        if "fallback_ratio" in batch.non_tensor_batch:
+                            metrics["train/fallback_ratio"] = float(batch.non_tensor_batch["fallback_ratio"][0])
 
                     # update critic
                     if self.use_critic:
