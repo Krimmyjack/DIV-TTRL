@@ -1279,7 +1279,7 @@ class RayPPOTrainer:
                             AdvantageEstimator.DIVERSITY_DENSITY_HYBRID
                         ]:
                             diversity_density_config = {
-                                "k": getattr(self, "n_votes_per_prompt", 8),
+                                "k": getattr(self.config.algorithm, "diversity_density_k", 8),
                                 "fallback_estimator": getattr(
                                     self.config.algorithm, "diversity_density_fallback", "grpo"
                                 ),

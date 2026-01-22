@@ -256,6 +256,7 @@ python -m verl.trainer.main_ppo \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
   algorithm.diversity_density_fallback=grpo \
+  algorithm.diversity_density_k=8 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
