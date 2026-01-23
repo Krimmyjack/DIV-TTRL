@@ -1,30 +1,28 @@
 #!/bin/bash
-"""
-bash examples/labelfree/aime25_train.sh --task math_train --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
-"""
-export WANDB_ENTITY=2691454060-ucla
-"""
-AIME25 Training Script
-Uses AI-MO/aimo-validation-aime as training set and math-ai/aime25 as test set.
 
-Usage:
-    # First, prepare the data:
-    python examples/labelfree/prepare_aime25_data.py --local_dir ./data/AIME25-TTT
-    cd data && python preprocess_simplerl.py && cd ..
+# bash examples/labelfree/aime25_train.sh --task math_train --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+
+# AIME25 Training Script
+# Uses AI-MO/aimo-validation-aime as training set and math-ai/aime25 as test set.
+
+# Usage:
+#     # First, prepare the data:
+#     python examples/labelfree/prepare_aime25_data.py --local_dir ./data/AIME25-TTT
+#     cd data && python preprocess_simplerl.py && cd ..
     
-    # Then run training:
-    bash examples/labelfree/aime25_train.sh --backbone /path/to/Qwen3-4B-Base
+#     # Then run training:
+#     bash examples/labelfree/aime25_train.sh --backbone /path/to/Qwen3-4B-Base
     
-Options:
-    --backbone  Backbone model path (default: Qwen3-4B-Base)
-    --clip-high[=VAL] Clip ratio control
-    --ent       Entropy regularization coefficient (default: 0.000)
-    --temp      Temperature parameter (default: 1.0)
-"""
+# Options:
+#     --backbone  Backbone model path (default: Qwen3-4B-Base)
+#     --clip-high[=VAL] Clip ratio control
+#     --ent       Entropy regularization coefficient (default: 0.000)
+#     --temp      Temperature parameter (default: 1.0)
 
 # === Environment Setup ===
 unset VLLM_ATTENTION_BACKEND
 export VLLM_USE_V1=1
+export WANDB_ENTITY=2691454060-ucla
 
 # === Parse command line arguments ===
 while [[ $# -gt 0 ]]; do
@@ -256,6 +254,7 @@ python -m verl.trainer.main_ppo \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
   algorithm.diversity_density_fallback=grpo \
+  algorithm.diversity_density_k=8 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
