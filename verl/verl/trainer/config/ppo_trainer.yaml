@@ -195,6 +195,8 @@ algorithm:
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
+  diversity_density_fallback: grpo   # fallback estimator for DIVERSITY_DENSITY_HYBRID (grpo/pass_grpo/rloo)
+  diversity_density_k: 8             # group size k for diversity density calculation
   use_kl_in_reward: False
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
@@ -217,7 +219,7 @@ trainer:
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null
-  val_before_train: False
+  val_before_train: True
   test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null
