@@ -353,37 +353,41 @@ def compute_advantage(
                 index=data.non_tensor_batch["uid"],
             )
         
-        # ========== [2026-01-22 MODIFIED] ==========
-        # Changed from consistency_rate to accuracy_rate (ground_truth_ratio)
-        # Changed from per-sample sampling to per-prompt sampling
+        # ========== [2026-01-24 MODIFIED] ==========
+        # Changed from probability sampling to deterministic selection based on label_accuracy
+        # - label_accuracy = 1.0 (majority vote correct) -> use fallback estimator
+        # - label_accuracy = 0.0 (majority vote wrong) -> use diversity density estimator
         # =============================================
         
-        # 3. Probabilistic selection per sample based on accuracy rate (real reward correctness)
-        # p = accuracy_rate: probability of using fallback estimator
-        # When accuracy is high, prefer fallback; when accuracy is low, prefer diversity density
-        # Sample from Bernoulli(p) for each sample
+        # 3. Deterministic selection per prompt based on label_accuracy (pseudo-label correctness)
         bs = data.batch["token_level_rewards"].shape[0]
         device = data.batch["token_level_rewards"].device
         dtype = data.batch["token_level_rewards"].dtype
         
-        # Use accuracy_rate if available, otherwise fallback to consistency_rate
-        accuracy_rates = data.non_tensor_batch.get("accuracy_rate", None)
-        if accuracy_rates is not None:
-            p = torch.tensor(accuracy_rates, dtype=dtype, device=device)  # (bs,)
+        # Use label_accuracy for deterministic selection
+        # label_accuracy = 1.0 means majority vote is correct -> use fallback
+        # label_accuracy = 0.0 means majority vote is wrong -> use diversity density
+        label_accuracies = data.non_tensor_batch.get("label_accuracy", None)
+        if label_accuracies is not None:
+            # use_diversity = 1 when label_accuracy = 0 (wrong pseudo-label), 0 when label_accuracy = 1 (correct pseudo-label)
+            use_diversity = torch.tensor(1.0 - label_accuracies, dtype=dtype, device=device).unsqueeze(-1)  # (bs, 1)
         else:
-            # Fallback to consistency_rate for backward compatibility
-            p = torch.tensor(consistency_rates, dtype=dtype, device=device)  # (bs,)
+            # Fallback to old probability-based logic using accuracy_rate if label_accuracy not available
+            accuracy_rates = data.non_tensor_batch.get("accuracy_rate", None)
+            if accuracy_rates is not None:
+                p = torch.tensor(accuracy_rates, dtype=dtype, device=device)
+            else:
+                consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+                p = torch.tensor(consistency_rates, dtype=dtype, device=device) if consistency_rates is not None else torch.zeros(bs, dtype=dtype, device=device)
+            
+            # Sample: use_diversity[i] = 1 if random > p[i], else 0
+            uids = data.non_tensor_batch["uid"]
+            unique_uids = list(dict.fromkeys(uids))
+            uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
+            random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
+            use_diversity = (random_vals > p).float().unsqueeze(-1)  # (bs, 1)
         
-        # Sample: use_diversity[i] = 1 if random > p[i], else 0
-        # Use per-prompt sampling instead of per-sample sampling
-        # This ensures all samples from the same prompt use the same advantage calculation method
-        uids = data.non_tensor_batch["uid"]
-        unique_uids = list(dict.fromkeys(uids))  # Preserve order
-        uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
-        random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
-        use_diversity = (random_vals > p).float().unsqueeze(-1)  # (bs, 1)
-        
-        # Blend advantages
+        # Blend advantages based on selection
         advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
         returns = use_diversity * div_returns + (1 - use_diversity) * fallback_returns
         
@@ -391,12 +395,10 @@ def compute_advantage(
         data.batch["returns"] = returns
         
         # Calculate and store diversity density usage statistics for logging
-        # Per-prompt usage: check how many unique prompts used diversity density
-        uid_to_use_diversity = {uid: uid_to_random[uid] > p[list(uids).index(uid)].item() 
-                                for uid in unique_uids}
-        num_prompts_using_diversity = sum(1 for use in uid_to_use_diversity.values() if use)
-        num_total_prompts = len(unique_uids)
-        diversity_usage_ratio = num_prompts_using_diversity / num_total_prompts if num_total_prompts > 0 else 0.0
+        # Per-prompt usage: count samples using diversity density
+        num_using_diversity = use_diversity.sum().item()
+        num_total = bs
+        diversity_usage_ratio = num_using_diversity / num_total if num_total > 0 else 0.0
         
         # Store in meta_info (not non_tensor_batch, which requires matching batch size)
         data.meta_info["diversity_density_ratio"] = diversity_usage_ratio
@@ -1240,13 +1242,15 @@ class RayPPOTrainer:
                                 )
                                 metrics.update({"train/post_entropy": post_entropy_loss.detach().item()})
                                 
-                                # === NEW: Store answer_types, consistency_rate, and accuracy_rate for diversity density advantage ===
+                                # === NEW: Store answer_types, consistency_rate, accuracy_rate, and label_accuracy for diversity density advantage ===
                                 if "_answer_types" in ttrl_metrics:
                                     batch.non_tensor_batch["answer_types"] = ttrl_metrics["_answer_types"]
                                 if "_consistency_rate" in ttrl_metrics:
                                     batch.non_tensor_batch["consistency_rate"] = ttrl_metrics["_consistency_rate"]
                                 if "_accuracy_rate" in ttrl_metrics:
                                     batch.non_tensor_batch["accuracy_rate"] = ttrl_metrics["_accuracy_rate"]
+                                if "_label_accuracy" in ttrl_metrics:
+                                    batch.non_tensor_batch["label_accuracy"] = ttrl_metrics["_label_accuracy"]
                                 
                         except Exception as e:
                             print(f"Error in reward_fn: {e}")
