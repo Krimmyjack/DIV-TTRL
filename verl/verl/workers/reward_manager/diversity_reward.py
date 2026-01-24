@@ -341,6 +341,7 @@ class DiversityTTRLRewardManager:
         all_answer_types = []
         all_consistency_rates = []
         all_accuracy_rates = []
+        all_label_accuracies = []  # NEW: Binary indicator of majority vote correctness
 
         for prompt_i in range(prompt_num):
             group_pred_outputs = []
@@ -399,6 +400,12 @@ class DiversityTTRLRewardManager:
             # =============================================
             accuracy_rate = ttrl_metrics.get("ground_truth_ratio", 0.0)
             
+            # ========== [2026-01-24 NEW] ==========
+            # Get label_accuracy (1.0 if majority vote matches ground truth, 0.0 otherwise)
+            # This is used for deterministic advantage estimator selection
+            # ======================================
+            label_accuracy = ttrl_metrics.get("label_accuracy", 0.0)
+            
             # Create answer type mapping (hash of answer string -> integer id)
             answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
             
@@ -409,6 +416,8 @@ class DiversityTTRLRewardManager:
                 all_consistency_rates.append(consistency_rate)
                 # Store accuracy rate (same for all samples in this prompt group)
                 all_accuracy_rates.append(accuracy_rate)
+                # Store label accuracy (same for all samples in this prompt group)
+                all_label_accuracies.append(label_accuracy)
 
             for k, v in ttrl_metrics.items():
                 all_ttrl_metrics[k].append(v)
@@ -441,17 +450,20 @@ class DiversityTTRLRewardManager:
         training_answer_types = []
         training_consistency_rates = []
         training_accuracy_rates = []
+        training_label_accuracies = []  # NEW
         for prompt_i in range(prompt_num):
             for i in range(self.n_samples_per_prompt):
                 global_idx = prompt_i * self.n_votes_per_prompt + i
                 training_answer_types.append(all_answer_types[global_idx])
                 training_consistency_rates.append(all_consistency_rates[global_idx])
                 training_accuracy_rates.append(all_accuracy_rates[global_idx])
+                training_label_accuracies.append(all_label_accuracies[global_idx])  # NEW
         
         # Store in ttrl_info for downstream use
         ttrl_info["_answer_types"] = np.array(training_answer_types)
         ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
         ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
+        ttrl_info["_label_accuracy"] = np.array(training_label_accuracies)  # NEW: Binary indicator
 
         print("\n=== TTRL Training Metrics Summary ===")
         for k, v in all_ttrl_metrics.items():
