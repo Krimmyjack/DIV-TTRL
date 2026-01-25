@@ -257,7 +257,7 @@ python -m verl.trainer.main_ppo \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  algorithm.diversity_density_k=$N_VOTES_PER_PROMPT \
+  algorithm.diversity_density_k=8 \
   trainer.logger=['console','wandb'] \
   trainer.resume_mode=auto \
   trainer.project_name=$WANDB_PROJECT \
