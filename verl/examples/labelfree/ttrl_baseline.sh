@@ -117,7 +117,7 @@ fi
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-ADVANTAGE="grpo"
+ADVANTAGE="pass_grpo"
 
 echo "=== Configuration Information ==="
 echo "Task: $TASK"
@@ -206,7 +206,7 @@ OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}"
 
 # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
-  reward_model.reward_manager=ttrl \
+  reward_model.reward_manager=truelabel_ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   reward_model.reward_kwargs.mode="train" \
@@ -257,6 +257,7 @@ python -m verl.trainer.main_ppo \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
+  algorithm.diversity_density_k=$N_VOTES_PER_PROMPT \
   trainer.logger=['console','wandb'] \
   trainer.resume_mode=auto \
   trainer.project_name=$WANDB_PROJECT \
