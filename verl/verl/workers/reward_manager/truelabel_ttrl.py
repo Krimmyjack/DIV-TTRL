@@ -33,7 +33,6 @@ import torch
 
 from verl import DataProto
 from verl.utils.reward_score.ttrl.auto_verify import auto_verify
-from verl.utils.reward_score.ttrl.ttt_metrics import test_time_train_metrics
 from verl.utils.reward_score.ttrl.latex_clean import normalize_latex
 from verl.utils.reward_score.ttrl.qwen.qwen_math_parser import extract_answer
 
@@ -221,15 +220,22 @@ class TrueLabelTTRLRewardManager:
             # ========== KEY CHANGE: Use ground truth for rewards ==========
             # Compute rewards by comparing each output to the ground truth
             ground_truth = group_labels[0]  # All labels should be the same for one prompt
+            
+            # Verify all labels in this group match (data may be shuffled)
+            if len(set(group_labels)) != 1:
+                print(f"WARNING: Ground truth not unique in prompt group {prompt_i}, using first label")
+            
             true_rewards, _ = auto_verify(
                 task, group_pred_outputs, [ground_truth] * len(group_pred_outputs),
                 extra_info=group_extra_info
             )
             
-            # Also compute TTRL metrics for logging (uses majority voting internally)
-            _, ttrl_metrics = test_time_train_metrics(
-                group_pred_outputs, group_labels, task=task, extra_info=group_extra_info
-            )
+            # Compute metrics directly (no need for test_time_train_metrics which uses majority voting)
+            ground_truth_ratio = sum(true_rewards) / len(true_rewards)
+            ttrl_metrics = {
+                "ground_truth_ratio": ground_truth_ratio,
+                f"pass@{len(group_pred_outputs)}": 1.0 if sum(true_rewards) >= 1 else 0.0,
+            }
 
             # Compute answer types for PASS_GRPO
             # answer_type = 0 means correct (matches ground truth), else unique hash
@@ -240,10 +246,7 @@ class TrueLabelTTRLRewardManager:
                 else:
                     all_answer_types.append(hash(final_answers[i]))  # Unique type for incorrect
 
-            # Compute metrics
-            ground_truth_ratio = sum(true_rewards) / len(true_rewards)
-            ttrl_metrics["ground_truth_ratio"] = ground_truth_ratio
-            ttrl_metrics[f"pass@{len(group_pred_outputs)}"] = 1.0 if sum(true_rewards) >= 1 else 0.0
+            # Metrics already computed above
 
             for k, v in ttrl_metrics.items():
                 all_ttrl_metrics[k].append(v)

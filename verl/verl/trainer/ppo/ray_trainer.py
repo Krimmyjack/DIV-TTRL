@@ -497,7 +497,7 @@ class RayPPOTrainer:
         else:
             raise NotImplementedError
         
-        if self.config.reward_model.reward_manager == "ttrl" or self.config.reward_model.reward_manager == "semantic_ttrl" or self.config.reward_model.reward_manager == "diversity_ttrl":
+        if self.config.reward_model.reward_manager in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl"]:
             self.use_ttrl = True
             self.n_samples_per_prompt = self.config.reward_model.reward_kwargs.n_samples_per_prompt
             self.n_votes_per_prompt = self.config.reward_model.reward_kwargs.n_votes_per_prompt
