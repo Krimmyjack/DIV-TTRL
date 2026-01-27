@@ -258,6 +258,7 @@ python -m verl.trainer.main_ppo \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
   algorithm.diversity_density_k=8 \
+  algorithm.diversity_density_use_metric=label_accuracies \
   trainer.logger=['console','wandb'] \
   trainer.resume_mode=auto \
   trainer.project_name=$WANDB_PROJECT \

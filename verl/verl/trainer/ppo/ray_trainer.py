@@ -353,11 +353,8 @@ def compute_advantage(
                 index=data.non_tensor_batch["uid"],
             )
         
-        # ========== [2026-01-24 MODIFIED] ==========
-        # Changed from probability sampling to deterministic selection based on label_accuracy
-        # - label_accuracy = 1.0 (majority vote correct) -> use fallback estimator
-        # - label_accuracy = 0.0 (majority vote wrong) -> use diversity density estimator
-        # =============================================
+        # ========== [2026-01-27 MODIFIED] ==========
+        # modify the select logits
         
         # 3. Deterministic selection per prompt based on label_accuracy (pseudo-label correctness)
         bs = data.batch["token_level_rewards"].shape[0]
@@ -368,17 +365,21 @@ def compute_advantage(
         # label_accuracy = 1.0 means majority vote is correct -> use fallback
         # label_accuracy = 0.0 means majority vote is wrong -> use diversity density
         label_accuracies = data.non_tensor_batch.get("label_accuracy", None)
-        if label_accuracies is not None:
-            # use_diversity = 1 when label_accuracy = 0 (wrong pseudo-label), 0 when label_accuracy = 1 (correct pseudo-label)
+        use_metric = diversity_density_config.get("use_metric", "consistency_rate")
+        accuracy_rates = data.non_tensor_batch.get("accuracy_rate", None)
+        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+        
+        if use_metric == "label_accuracies" and label_accuracies is not None:
+            # Deterministic: use_diversity = 1 when label_accuracy = 0 (wrong pseudo-label)
             use_diversity = torch.tensor(1.0 - label_accuracies, dtype=dtype, device=device).unsqueeze(-1)  # (bs, 1)
         else:
-            # Fallback to old probability-based logic using accuracy_rate if label_accuracy not available
-            accuracy_rates = data.non_tensor_batch.get("accuracy_rate", None)
-            if accuracy_rates is not None:
+            # Probabilistic selection: sample use_diversity based on probability p
+            if use_metric == "accuracy_rates" and accuracy_rates is not None:
                 p = torch.tensor(accuracy_rates, dtype=dtype, device=device)
+            elif consistency_rates is not None:
+                p = torch.tensor(consistency_rates, dtype=dtype, device=device)
             else:
-                consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
-                p = torch.tensor(consistency_rates, dtype=dtype, device=device) if consistency_rates is not None else torch.zeros(bs, dtype=dtype, device=device)
+                p = torch.zeros(bs, dtype=dtype, device=device)
             
             # Sample: use_diversity[i] = 1 if random > p[i], else 0
             uids = data.non_tensor_batch["uid"]
@@ -1280,12 +1281,16 @@ class RayPPOTrainer:
                         diversity_density_config = None
                         if self.config.algorithm.adv_estimator in [
                             AdvantageEstimator.DIVERSITY_DENSITY,
-                            AdvantageEstimator.DIVERSITY_DENSITY_HYBRID
+                            AdvantageEstimator.DIVERSITY_DENSITY_HYBRID,
+                            AdvantageEstimator.PASS_GRPO,
                         ]:
                             diversity_density_config = {
                                 "k": getattr(self.config.algorithm, "diversity_density_k", 8),
                                 "fallback_estimator": getattr(
                                     self.config.algorithm, "diversity_density_fallback", "grpo"
+                                ),
+                                "use_metric": getattr(
+                                    self.config.algorithm, "diversity_density_use_metric", "consistency_rate"
                                 ),
                             }
                         
