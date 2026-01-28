@@ -353,72 +353,6 @@ def compute_diversity_density_advantage_from_prompts(
     return advantages, advantages.clone()
 
 
-def _compute_pass_at_k_weight(N: int, c_maj: int, k: int) -> float:
-    """
-    Compute pass@k weight using the formula: ρ_K = 1 - C(N - c_maj, k) / C(N, k)
-    
-    This represents the probability of having at least one correct answer
-    in a random group of k samples from N total samples.
-    
-    Args:
-        N: Total number of samples
-        c_maj: Count of majority (correct) answers
-        k: Group size
-    
-    Returns:
-        Weight ρ_K in [0, 1]
-    """
-    if N <= 0 or k <= 0 or k > N:
-        return 0.0
-    
-    # Handle edge cases
-    if c_maj >= N:  # All are correct
-        return 1.0
-    
-    if c_maj <= 0:  # None are correct
-        return 0.0
-    
-    # Use log-space for numerical stability
-    log_comb_N_k = _log_comb(np.array([N]), np.array([k]))[0]
-    log_comb_N_minus_c_k = _log_comb(np.array([N - c_maj]), np.array([k]))[0]
-    
-    if not np.isfinite(log_comb_N_k) or not np.isfinite(log_comb_N_minus_c_k):
-        # Fallback: use product form
-        log_prob = 0.0
-        for j in range(k):
-            log_prob += np.log(max(N - c_maj - j, 1e-10)) - np.log(N - j)
-        prob_not_in_group = np.exp(log_prob)
-    else:
-        prob_not_in_group = np.exp(log_comb_N_minus_c_k - log_comb_N_k)
-    
-    # Clamp to [0, 1]
-    prob_not_in_group = np.clip(prob_not_in_group, 0.0, 1.0)
-    weight = 1.0 - prob_not_in_group
-    
-    return weight
-
-
-def _compute_pass_at_k_weight_vectorized(N: int, c_maj_arr: np.ndarray, k: int) -> np.ndarray:
-    """
-    Vectorized version: compute pass@k weights for multiple groups.
-    
-    Args:
-        N: Total number of samples
-        c_maj_arr: Array of majority answer counts for each group
-        k: Group size
-    
-    Returns:
-        Array of weights ρ_K for each group
-    """
-    c_maj_arr = np.asarray(c_maj_arr, dtype=np.float64)
-    weights = np.zeros_like(c_maj_arr, dtype=np.float64)
-    
-    for i, c_maj in enumerate(c_maj_arr):
-        weights[i] = _compute_pass_at_k_weight(N, int(c_maj), k)
-    
-    return weights
-
-
 def compute_pass_grpo_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -428,42 +362,31 @@ def compute_pass_grpo_advantage(
     epsilon: float = 1e-6
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute pass@k reweighted GRPO advantage.
+    Compute pass@k advantage using the correct mathematical formulation.
     
-    This implements the pass@k reweighting scheme:
-    1. Compute standard GRPO advantages
-    2. Per prompt group, compute pass@k weight: ρ_K = 1 - C(N - c_maj, k) / C(N, k)
-    3. Reweight advantages by ρ_K within each prompt group
-    
-    where:
-    - N: total samples per prompt
-    - c_maj: count of majority (correct) answers per prompt  
-    - k: group size (typically n_votes_per_prompt)
+    References:
+    - Group Mean Reward (R_bar): Eq. 11
+    - Group Std (sigma): Eq. 12
+    - Positive Advantage (A_pos): Eq. 14
+    - Negative Advantage (A_neg): Eq. 15
     
     Args:
         token_level_rewards: (torch.Tensor) shape (bs, response_length)
         response_mask: (torch.Tensor) shape (bs, response_length)
         index: (np.ndarray) prompt indices for each sample
-        answer_types: (np.ndarray) answer type/id for each sample
+        answer_types: (np.ndarray) answer type/id for each sample (0 is correct)
         k: Group size
         epsilon: Small value for numerical stability
     
     Returns:
-        advantages: (torch.Tensor) shape (bs, response_length) - reweighted advantages
-        returns: (torch.Tensor) shape (bs, response_length) - same as advantages
+        advantages: (torch.Tensor) shape (bs, response_length)
+        returns: (torch.Tensor) same as advantages
     """
     bs, response_length = token_level_rewards.shape
     device = token_level_rewards.device
     dtype = token_level_rewards.dtype
     
-    # Step 1: Compute base GRPO advantage
-    grpo_advantages, _ = compute_grpo_outcome_advantage(
-        token_level_rewards=token_level_rewards,
-        response_mask=response_mask,
-        index=index,
-    )
-    
-    # Step 2: Group samples by prompt and compute pass@k weights
+    # Group samples by prompt
     prompt_to_samples = defaultdict(list)
     prompt_to_answers = defaultdict(list)
     
@@ -472,28 +395,66 @@ def compute_pass_grpo_advantage(
         prompt_to_samples[prompt_idx].append(i)
         prompt_to_answers[prompt_idx].append(answer_types[i])
     
-    # Initialize reweight factors
-    reweight_factors = torch.ones(bs, 1, dtype=dtype, device=device)
+    # Initialize advantages
+    advantages = torch.zeros(bs, 1, dtype=dtype, device=device)
     
-    # Compute pass@k weight per prompt
     for prompt_idx, sample_indices in prompt_to_samples.items():
-        N = len(sample_indices)  # Total samples for this prompt
-        
-        # Count majority (correct) answers - assume 0 is correct/majority
-        # and other values are incorrect
+        N = len(sample_indices)
         answers = prompt_to_answers[prompt_idx]
-        c_maj = sum(1 for a in answers if a == 0)  # Count of correct answers
         
-        # Compute pass@k weight
-        pass_at_k_weight = _compute_pass_at_k_weight(N, c_maj, k)
+        # Count outcomes
+        # Assume 0 is the correct answer type
+        c_maj = sum(1 for a in answers if a == 0)
+        c_neg = N - c_maj
         
-        # Assign reweight factor to all samples in this prompt
-        weight_tensor = torch.tensor(pass_at_k_weight, dtype=dtype, device=device)
-        for sample_idx in sample_indices:
-            reweight_factors[sample_idx] = weight_tensor
-    
-    # Step 3: Reweight advantages
-    advantages = grpo_advantages * reweight_factors
+        # 1. Compute Group Mean Reward (Prob of at least one correct in k samples)
+        # R_mean = 1 - C(N_neg, k) / C(N, k)
+        # Use log-space for stability: log(P_fail) = log_comb(N_neg, k) - log_comb(N, k)
+        log_prob_fail = _log_comb(np.array([c_neg]), np.array([k]))[0] - \
+                        _log_comb(np.array([N]), np.array([k]))[0]
+        
+        prob_fail = np.exp(log_prob_fail) if np.isfinite(log_prob_fail) else 0.0
+        prob_fail = np.clip(prob_fail, 0.0, 1.0)
+        r_mean = 1.0 - prob_fail
+        
+        # 2. Compute Group Standard Deviation
+        variance = r_mean * (1.0 - r_mean)
+        std = np.sqrt(variance)
+        
+        if std < epsilon:
+            # Deterministic outcome (always pass or always fail) -> 0 advantage
+            a_pos = 0.0
+            a_neg = 0.0
+        else:
+            # 3. Positive Advantage (Eq. 14)
+            # A_pos = (1 - R_mean) / sigma = P_fail / sigma
+            a_pos = prob_fail / std
+            
+            # 4. Negative Advantage (Eq. 15)
+            # A_neg = ( (1 - R_mean) - P_cond ) / sigma
+            # P_cond = C(N_neg - 1, k - 1) / C(N - 1, k - 1) (Prob failure given we picked a negative)
+            
+            if c_neg >= 1:
+                log_p_cond_fail = _log_comb(np.array([c_neg - 1]), np.array([k - 1]))[0] - \
+                                  _log_comb(np.array([N - 1]), np.array([k - 1]))[0]
+                p_cond_fail = np.exp(log_p_cond_fail) if np.isfinite(log_p_cond_fail) else 0.0
+                p_cond_fail = np.clip(p_cond_fail, 0.0, 1.0)
+            else:
+                p_cond_fail = 0.0 # Should not happen if we are assigning to a negative sample
+            
+            # A_neg = (P_fail - P_cond_fail) / sigma
+            a_neg = (prob_fail - p_cond_fail) / std
+            
+        # Assign advantages based on correctness
+        # We need to map back to the original indices
+        
+        for local_i, global_i in enumerate(sample_indices):
+            is_correct = (answers[local_i] == 0)
+            val = a_pos if is_correct else a_neg
+            advantages[global_i] = val
+            
+    # Expand to response length and mask
+    advantages = advantages * response_mask
     returns = advantages.clone()
     
     return advantages, returns
