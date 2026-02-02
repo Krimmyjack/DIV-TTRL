@@ -213,7 +213,9 @@ def compute_advantage(
         diversity_density_config: Config dict for diversity density estimator, containing:
             - fallback_estimator: str, e.g., "grpo", "rloo"
             - k: int, group size (typically n_votes_per_prompt)
-            - consistency_threshold: float, threshold above which to use diversity density
+            - consistency_threshold: float, threshold for switching selection mode (default: 0.0)
+                - When consistency_rate < threshold: deterministically use diversity density
+                - When consistency_rate >= threshold: probabilistically select based on consistency_rate
     
     Returns:
         data: DataProto with advantages and returns added
@@ -369,11 +371,14 @@ def compute_advantage(
         accuracy_rates = data.non_tensor_batch.get("accuracy_rate", None)
         consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
         
+        # Get consistency_threshold from config (default 0.0 means always probabilistic)
+        consistency_threshold = diversity_density_config.get("consistency_threshold", 0.0)
+        
         if use_metric == "label_accuracies" and label_accuracies is not None:
             # Deterministic: use_diversity = 1 when label_accuracy = 0 (wrong pseudo-label)
             use_diversity = torch.tensor(1.0 - label_accuracies, dtype=dtype, device=device).unsqueeze(-1)  # (bs, 1)
         else:
-            # Probabilistic selection: sample use_diversity based on probability p
+            # Get consistency rate values
             if use_metric == "accuracy_rates" and accuracy_rates is not None:
                 p = torch.tensor(accuracy_rates, dtype=dtype, device=device)
             elif consistency_rates is not None:
@@ -381,12 +386,19 @@ def compute_advantage(
             else:
                 p = torch.zeros(bs, dtype=dtype, device=device)
             
-            # Sample: use_diversity[i] = 1 if random > p[i], else 0
+            # Threshold-based selection:
+            # - When p < threshold: deterministically use diversity density (use_diversity = 1)
+            # - When p >= threshold: probabilistically select based on p
             uids = data.non_tensor_batch["uid"]
             unique_uids = list(dict.fromkeys(uids))
             uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
             random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
-            use_diversity = (random_vals > p).float().unsqueeze(-1)  # (bs, 1)
+            
+            # Below threshold: always use diversity (use_diversity = 1)
+            # Above threshold: use diversity if random > p, else use fallback
+            below_threshold = (p < consistency_threshold).float()
+            probabilistic_selection = (random_vals > p).float()
+            use_diversity = (below_threshold + (1 - below_threshold) * probabilistic_selection).unsqueeze(-1)  # (bs, 1)
         
         # Blend advantages based on selection
         advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
@@ -1291,6 +1303,9 @@ class RayPPOTrainer:
                                 ),
                                 "use_metric": getattr(
                                     self.config.algorithm, "diversity_density_use_metric", "consistency_rate"
+                                ),
+                                "consistency_threshold": getattr(
+                                    self.config.algorithm, "consistency_threshold", 0.0
                                 ),
                             }
                         
