@@ -396,7 +396,7 @@ def compute_advantage(
             
             # Below threshold: always use diversity (use_diversity = 1)
             # Above threshold: use diversity if random > p, else use fallback
-            below_threshold = (p < consistency_threshold).float()
+            below_threshold = (p > consistency_threshold).float()
             probabilistic_selection = (random_vals > p).float()
             use_diversity = (below_threshold + (1 - below_threshold) * probabilistic_selection).unsqueeze(-1)  # (bs, 1)
         

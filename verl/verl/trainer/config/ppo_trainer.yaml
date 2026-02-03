@@ -198,7 +198,7 @@ algorithm:
   diversity_density_fallback: grpo   # fallback estimator for DIVERSITY_DENSITY_HYBRID (grpo/pass_grpo/rloo)
   diversity_density_k: 8             # group size k for diversity density calculation
   diversity_density_use_metric: consistency_rate  # metric for advantage estimator selection (label_accuracies/accuracy_rates/consistency_rate)
-  consistency_threshold: 0.5
+  consistency_threshold: 0.7
   use_kl_in_reward: False
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
