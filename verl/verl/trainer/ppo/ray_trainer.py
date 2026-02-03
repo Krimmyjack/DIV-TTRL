@@ -389,7 +389,7 @@ def compute_advantage(
             # Deterministic threshold-based selection:
             # - When p > threshold: use diversity density (use_diversity = 1)
             # - When p <= threshold: use pass_grpo fallback (use_diversity = 0)
-            use_diversity = (p > consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
+            use_diversity = (torch.tensor(consistency_rates, dtype=dtype, device=device) > consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
         
         # Blend advantages based on selection
         advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
