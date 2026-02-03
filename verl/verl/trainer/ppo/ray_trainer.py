@@ -374,20 +374,22 @@ def compute_advantage(
         # Get consistency_threshold from config (default 0.0 means always probabilistic)
         consistency_threshold = diversity_density_config.get("consistency_threshold", 0.0)
         
-        # Get the metric value for threshold comparison
         if use_metric == "label_accuracies" and label_accuracies is not None:
-            p = torch.tensor(label_accuracies, dtype=dtype, device=device)
-        elif use_metric == "accuracy_rates" and accuracy_rates is not None:
-            p = torch.tensor(accuracy_rates, dtype=dtype, device=device)
-        elif consistency_rates is not None:
-            p = torch.tensor(consistency_rates, dtype=dtype, device=device)
+            # Deterministic: use_diversity = 1 when label_accuracy = 0 (wrong pseudo-label)
+            use_diversity = torch.tensor(1.0 - label_accuracies, dtype=dtype, device=device).unsqueeze(-1)  # (bs, 1)
         else:
-            p = torch.zeros(bs, dtype=dtype, device=device)
-        
-        # Deterministic threshold-based selection:
-        # - When p > threshold: use diversity density advantage
-        # - When p <= threshold: use fallback advantage
-        use_diversity = (p > consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
+            # Get consistency rate values
+            if use_metric == "accuracy_rates" and accuracy_rates is not None:
+                p = torch.tensor(accuracy_rates, dtype=dtype, device=device)
+            elif consistency_rates is not None:
+                p = torch.tensor(consistency_rates, dtype=dtype, device=device)
+            else:
+                p = torch.zeros(bs, dtype=dtype, device=device)
+            
+            # Deterministic threshold-based selection:
+            # - When p > threshold: use diversity density (use_diversity = 1)
+            # - When p <= threshold: use pass_grpo fallback (use_diversity = 0)
+            use_diversity = (p > consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
         
         # Blend advantages based on selection
         advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
@@ -405,6 +407,31 @@ def compute_advantage(
         # Store in meta_info (not non_tensor_batch, which requires matching batch size)
         data.meta_info["diversity_density_ratio"] = diversity_usage_ratio
         data.meta_info["fallback_ratio"] = 1.0 - diversity_usage_ratio
+        
+        # ========== [2026-02-03 NEW] ==========
+        # Add comprehensive diagnostic metrics for pass_grpo and diversity_density
+        # ===========================================
+        if answer_types is not None:
+            answer_types_tensor = torch.tensor(answer_types, dtype=torch.long, device=device)
+            correct_mask = (answer_types_tensor == 0)  # answer_type == 0 means correct (matches majority)
+            num_correct = correct_mask.sum().item()
+            num_incorrect = bs - num_correct
+            correct_ratio = num_correct / bs if bs > 0 else 0.0
+            
+            # Store pass_grpo diagnostic metrics
+            data.meta_info["pass_grpo/correct_ratio"] = correct_ratio
+            
+            # Calculate average advantage for correct vs incorrect samples (fallback/pass_grpo)
+            if num_correct > 0:
+                data.meta_info["pass_grpo/avg_correct_advantage"] = fallback_advantages[correct_mask].mean().item()
+            if num_incorrect > 0:
+                data.meta_info["pass_grpo/avg_incorrect_advantage"] = fallback_advantages[~correct_mask].mean().item()
+            
+            # Fallback (pass_grpo) total average advantage
+            data.meta_info["pass_grpo/avg_total_advantage"] = fallback_advantages.mean().item()
+        
+        # Diversity density advantage metrics
+        data.meta_info["diversity/avg_advantage"] = div_advantages.mean().item()
     elif adv_estimator == AdvantageEstimator.PASS_GRPO:
         # Pass@k reweighted GRPO advantage
         if diversity_density_config is None:
@@ -1312,6 +1339,20 @@ class RayPPOTrainer:
                             metrics["train/diversity_density_ratio"] = float(batch.meta_info["diversity_density_ratio"])
                         if "fallback_ratio" in batch.meta_info:
                             metrics["train/fallback_ratio"] = float(batch.meta_info["fallback_ratio"])
+                        
+                        # Log pass_grpo diagnostic metrics if available
+                        if "pass_grpo/correct_ratio" in batch.meta_info:
+                            metrics["train/pass_grpo_correct_ratio"] = float(batch.meta_info["pass_grpo/correct_ratio"])
+                        if "pass_grpo/avg_correct_advantage" in batch.meta_info:
+                            metrics["train/pass_grpo_avg_correct_adv"] = float(batch.meta_info["pass_grpo/avg_correct_advantage"])
+                        if "pass_grpo/avg_incorrect_advantage" in batch.meta_info:
+                            metrics["train/pass_grpo_avg_incorrect_adv"] = float(batch.meta_info["pass_grpo/avg_incorrect_advantage"])
+                        if "pass_grpo/avg_total_advantage" in batch.meta_info:
+                            metrics["train/pass_grpo_avg_total_adv"] = float(batch.meta_info["pass_grpo/avg_total_advantage"])
+                        
+                        # Log diversity density advantage metrics
+                        if "diversity/avg_advantage" in batch.meta_info:
+                            metrics["train/diversity_avg_adv"] = float(batch.meta_info["diversity/avg_advantage"])
 
                     # update critic
                     if self.use_critic:

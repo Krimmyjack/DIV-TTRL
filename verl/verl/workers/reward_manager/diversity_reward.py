@@ -406,12 +406,20 @@ class DiversityTTRLRewardManager:
             # ======================================
             label_accuracy = ttrl_metrics.get("label_accuracy", 0.0)
             
-            # Create answer type mapping (hash of answer string -> integer id)
-            answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
+            # ========== [2026-02-03 FIXED] ==========
+            # For pass_grpo compatibility: answer_type = 0 means "correct" (matches majority vote)
+            # For diversity_density: we still group by answer content, but correct answers share type 0
+            # ===========================================
             
             for i in range(self.n_votes_per_prompt):
                 # Store answer type id for each sample
-                all_answer_types.append(answer_to_id[final_answers[i]])
+                # base_rewards[i] > 0 means this answer matches the majority vote (pseudo-correct)
+                if base_rewards[i] > 0:
+                    all_answer_types.append(0)  # Correct answer type = 0 for pass_grpo
+                else:
+                    # Use hash for unique incorrect answer ID, ensure it's not 0
+                    ans_hash = hash(final_answers[i])
+                    all_answer_types.append(ans_hash if ans_hash != 0 else 1)
                 # Store consistency rate (same for all samples in this prompt group)
                 all_consistency_rates.append(consistency_rate)
                 # Store accuracy rate (same for all samples in this prompt group)

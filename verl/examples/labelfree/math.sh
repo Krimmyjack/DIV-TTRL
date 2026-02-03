@@ -318,7 +318,7 @@ python -m verl.trainer.main_ppo \
   algorithm.diversity_density_fallback=pass_grpo \
   algorithm.diversity_density_k=8 \
   algorithm.diversity_density_use_metric=consistency_rate \
-  algorithm.diversity_density_threshold=0.5 \
+  algorithm.consistency_threshold=0.7 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
