@@ -386,14 +386,28 @@ def compute_advantage(
             else:
                 p = torch.zeros(bs, dtype=dtype, device=device)
             
-            # Deterministic threshold-based selection:
-            # - When p > threshold: use diversity density (use_diversity = 1)
-            # - When p <= threshold: use pass_grpo fallback (use_diversity = 0)
-            use_diversity = (torch.tensor(consistency_rates, dtype=dtype, device=device) > consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
-        
-        # Blend advantages based on selection
-        advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
-        returns = use_diversity * div_returns + (1 - use_diversity) * fallback_returns
+            # Threshold-based selection with probabilistic blending:
+            # - When p > threshold: advantages = 0 (skip training)
+            # - When p <= threshold: probabilistic selection with (1-p) for diversity, p for fallback
+            
+            # Create mask for samples that should be trained (p <= threshold)
+            train_mask = (p <= consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
+            
+            # For trainable samples, probabilistic selection per prompt
+            uids = data.non_tensor_batch["uid"]
+            unique_uids = list(dict.fromkeys(uids))
+            uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
+            random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
+            
+            # random < (1-p) -> use diversity, random >= (1-p) -> use fallback
+            use_diversity = (random_vals < (1 - p)).float().unsqueeze(-1)  # (bs, 1)
+            
+            # Blend advantages: trainable samples get blended advantage, others get 0
+            blended_advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
+            blended_returns = use_diversity * div_returns + (1 - use_diversity) * fallback_returns
+            
+            advantages = train_mask * blended_advantages  # p > threshold samples get 0
+            returns = train_mask * blended_returns
         
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
