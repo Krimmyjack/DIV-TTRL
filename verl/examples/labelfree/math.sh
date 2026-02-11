@@ -1,6 +1,11 @@
 #!/bin/bash
 """
-bash examples/labelfree/math.sh --task math_train --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+bash examples/labelfree/math.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
+    --backend fsdp \
+    --local_dir /root//autodl-tmp/DIV-TTRL/verl/checkpoints/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/global_step_90/actor \
+    --hf_model_path /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
+    --target_dir /root/autodl-tmp/model/math_step_90
 """
 export WANDB_ENTITY=2691454060-ucla
 # === TTRL Training Script ===
@@ -101,7 +106,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set default values
-    TASK=${TASK:-"MATH"}
+TASK=${TASK:-"MATH"}
 BACKBONE=${BACKBONE:-"Qwen3-4B-Base"}
 CLIP_HIGH=${CLIP_HIGH:-"false"}
 CLIP_SPECIFIED=${CLIP_SPECIFIED:-"false"}
@@ -159,7 +164,7 @@ else
 fi
 
 # Set EPISODE
-EPISODE=10
+EPISODE=8
 DATA_TRAIN_BATCH_SIZE=32
 N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
@@ -215,7 +220,7 @@ if [ "$RAW_TASK" = "math_train" ]; then
   EXPERIMENT="${EXPERIMENT}-MATH_TRAIN"
 elif [ "$TASK" = "AIME-TTT" ]; then
   WANDB_PROJECT="TTRL-AIME24"
-elif  "$TASK" = "AMC-TTT" ]; then
+elif [ "$TASK" = "AMC-TTT" ]; then
   WANDB_PROJECT="TTRL-AMC"
 else
   WANDB_PROJECT="TTRL-MATH500"
@@ -231,7 +236,7 @@ EXPERIMENT="${EXPERIMENT}-Ent${ENTROPY_COEFF}"
 
 
 LOG_NAME="${EXPERIMENT}-${MODEL}"
-OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}"
+OUTPUT_DIR="/root/autodl-tmp/model/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}/${TIME_TAG}"
 
 
 
@@ -310,9 +315,10 @@ python -m verl.trainer.main_ppo \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  algorithm.diversity_density_fallback=grpo \
+  algorithm.diversity_density_fallback=pass_grpo \
   algorithm.diversity_density_k=8 \
   algorithm.diversity_density_use_metric=consistency_rate \
+  algorithm.consistency_threshold=0.7 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
@@ -330,94 +336,3 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Project name: $WANDB_PROJECT"
 echo "Experiment name: $LOG_NAME"
 # echo "========================"
-
-# === Automatic Evaluation Module ===
-echo ""
-echo "🚀 Starting automatic evaluation process..."
-echo "========================================="
-
-# 1. Detect latest checkpoint
-echo "📁 Detecting latest checkpoint..."
-LATEST_CHECKPOINT=""
-if [ -d "$OUTPUT_DIR" ]; then
-    # Find latest global_step directory
-    LATEST_CHECKPOINT=$(find "$OUTPUT_DIR" -name "global_step_*" -type d | sort -V | tail -n 1)
-    if [ -n "$LATEST_CHECKPOINT" ]; then
-        echo "✅ Found latest checkpoint: $LATEST_CHECKPOINT"
-    else
-        echo "❌ No checkpoint found, skipping evaluation"
-        exit 0
-    fi
-else
-    echo "❌ Output directory does not exist, skipping evaluation"
-    exit 0
-fi
-
-# 2. Build model merge parameters
-echo "🔧 Building model merge parameters..."
-ACTOR_DIR="${LATEST_CHECKPOINT}/actor"
-HF_MODEL_PATH="$BACKBONE_PATH"
-
-# Build target directory name
-TARGET_MODEL_NAME="${MODEL}-${EXPERIMENT}"
-TARGET_DIR="/root/autodl-tmp/model/${TARGET_MODEL_NAME}"
-# Remove slashes from model name when uploading to HF
-SANITIZED_TARGET_MODEL_NAME="${TARGET_MODEL_NAME//\//-}"
-HF_UPLOAD_PATH="Qwen/${SANITIZED_TARGET_MODEL_NAME}"
-
-echo "Model merge configuration:"
-echo "  - Local directory: $ACTOR_DIR"
-# echo "  - HF model path: $HF_MODEL_PATH"
-echo "  - Target directory: $TARGET_DIR"
-echo "  - HF upload path: $HF_UPLOAD_PATH"
-
-# 3. Execute model merge
-echo ""
-echo "🔄 Starting model merge..."
-python /root/autodl-tmp/EVOL-RL/verl/scripts/model_merger.py \
-    --backend fsdp \
-    --local_dir "$ACTOR_DIR" \
-    --hf_model_path "$HF_MODEL_PATH" \
-    --target_dir "$TARGET_DIR" 
-# python -m scripts.model_merger \
-#     --backend fsdp \
-#     --local_dir "$ACTOR_DIR" \
-#     --hf_model_path "$HF_MODEL_PATH" \
-#     --target_dir "$TARGET_DIR" \
-#     --hf_upload_path "$HF_UPLOAD_PATH"
-MERGE_OK=0
-if [ -d "$TARGET_DIR" ]; then
-  if compgen -G "$TARGET_DIR/*.safetensors" > /dev/null || [ -f "$TARGET_DIR/tokenizer.json" ]; then
-    MERGE_OK=1
-  fi
-fi
-if [ $MERGE_OK -eq 0 ]; then
-    echo "✅ Model merge successful"
-else
-    echo "❌ Model merge failed, skipping evaluation"
-    exit 1
-fi
-
-# 4. Execute automatic evaluation
-echo ""
-echo "🧪 Starting automatic evaluation..."
-echo "Evaluating model: $TARGET_DIR"
-
-# Call test script
-./test_three_datasets.sh --model_path "$TARGET_DIR" --backbone "$BACKBONE"
-
-if [ $? -eq 0 ]; then
-    echo "✅ Automatic evaluation completed"
-    echo ""
-    echo "========================================="
-    echo "🚀 All tasks completed successfully!"
-    echo "💾 Logs have been saved"
-    echo "🛑 System will shutdown in 60 seconds..."
-    echo "========================================="
-    # 等待60秒再关机，给用户时间保存日志或取消
-    sleep 60
-    /usr/bin/shutdown -h now
-else
-    echo "❌ Automatic evaluation failed"
-    exit 1
-fi

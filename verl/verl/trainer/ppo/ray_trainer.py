@@ -387,23 +387,28 @@ def compute_advantage(
                 # No metrics available: default to fallback (p=1 means always use fallback)
                 p = torch.ones(bs, dtype=dtype, device=device)
             
-            # Threshold-based selection:
-            # - When consistency_ratio > threshold: deterministically use diversity density (use_diversity = 1)
-            # - When consistency_ratio <= threshold: probabilistically select based on p
+            # Threshold-based selection with probabilistic blending:
+            # - When p > threshold: advantages = 0 (skip training)
+            # - When p <= threshold: probabilistic selection with (1-p) for diversity, p for fallback
+            
+            # Create mask for samples that should be trained (p <= threshold)
+            train_mask = (p <= consistency_threshold).float().unsqueeze(-1)  # (bs, 1)
+            
+            # For trainable samples, probabilistic selection per prompt
             uids = data.non_tensor_batch["uid"]
             unique_uids = list(dict.fromkeys(uids))
             uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
             random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
             
-            # Above threshold: always use diversity (use_diversity = 1)
-            # below threshold: use diversity if random > p, else use fallback
-            above_threshold = (p > consistency_threshold).float()
-            probabilistic_selection = (random_vals > p).float()
-            use_diversity = (above_threshold + (1 - above_threshold) * probabilistic_selection).unsqueeze(-1)  # (bs, 1)
-        
-        # Blend advantages based on selection
-        advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
-        returns = use_diversity * div_returns + (1 - use_diversity) * fallback_returns
+            # random < (1-p) -> use diversity, random >= (1-p) -> use fallback
+            use_diversity = (random_vals < (1 - p)).float().unsqueeze(-1)  # (bs, 1)
+            
+            # Blend advantages: trainable samples get blended advantage, others get 0
+            blended_advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
+            blended_returns = use_diversity * div_returns + (1 - use_diversity) * fallback_returns
+            
+            advantages = train_mask * blended_advantages  # p > threshold samples get 0
+            returns = train_mask * blended_returns
         
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -417,6 +422,31 @@ def compute_advantage(
         # Store in meta_info (not non_tensor_batch, which requires matching batch size)
         data.meta_info["diversity_density_ratio"] = diversity_usage_ratio
         data.meta_info["fallback_ratio"] = 1.0 - diversity_usage_ratio
+        
+        # ========== [2026-02-03 NEW] ==========
+        # Add comprehensive diagnostic metrics for pass_grpo and diversity_density
+        # ===========================================
+        if answer_types is not None:
+            answer_types_tensor = torch.tensor(answer_types, dtype=torch.long, device=device)
+            correct_mask = (answer_types_tensor == 0)  # answer_type == 0 means correct (matches majority)
+            num_correct = correct_mask.sum().item()
+            num_incorrect = bs - num_correct
+            correct_ratio = num_correct / bs if bs > 0 else 0.0
+            
+            # Store pass_grpo diagnostic metrics
+            data.meta_info["pass_grpo/correct_ratio"] = correct_ratio
+            
+            # Calculate average advantage for correct vs incorrect samples (fallback/pass_grpo)
+            if num_correct > 0:
+                data.meta_info["pass_grpo/avg_correct_advantage"] = fallback_advantages[correct_mask].mean().item()
+            if num_incorrect > 0:
+                data.meta_info["pass_grpo/avg_incorrect_advantage"] = fallback_advantages[~correct_mask].mean().item()
+            
+            # Fallback (pass_grpo) total average advantage
+            data.meta_info["pass_grpo/avg_total_advantage"] = fallback_advantages.mean().item()
+        
+        # Diversity density advantage metrics
+        data.meta_info["diversity/avg_advantage"] = div_advantages.mean().item()
     elif adv_estimator == AdvantageEstimator.PASS_GRPO:
         # Pass@k reweighted GRPO advantage
         if diversity_density_config is None:
@@ -1361,6 +1391,20 @@ class RayPPOTrainer:
                                     metrics["diag/adv_mean_bias"] = (tta_scalar - oracle_scalar)[valid].mean().item()
                             except Exception as e:
                                 print(f"Warning: Advantage bias diagnostics failed: {e}")
+                        
+                        # Log pass_grpo diagnostic metrics if available
+                        if "pass_grpo/correct_ratio" in batch.meta_info:
+                            metrics["train/pass_grpo_correct_ratio"] = float(batch.meta_info["pass_grpo/correct_ratio"])
+                        if "pass_grpo/avg_correct_advantage" in batch.meta_info:
+                            metrics["train/pass_grpo_avg_correct_adv"] = float(batch.meta_info["pass_grpo/avg_correct_advantage"])
+                        if "pass_grpo/avg_incorrect_advantage" in batch.meta_info:
+                            metrics["train/pass_grpo_avg_incorrect_adv"] = float(batch.meta_info["pass_grpo/avg_incorrect_advantage"])
+                        if "pass_grpo/avg_total_advantage" in batch.meta_info:
+                            metrics["train/pass_grpo_avg_total_adv"] = float(batch.meta_info["pass_grpo/avg_total_advantage"])
+                        
+                        # Log diversity density advantage metrics
+                        if "diversity/avg_advantage" in batch.meta_info:
+                            metrics["train/diversity_avg_adv"] = float(batch.meta_info["diversity/avg_advantage"])
 
                     # update critic
                     if self.use_critic:
