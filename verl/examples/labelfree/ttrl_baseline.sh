@@ -96,8 +96,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set default values
-TASK=${TASK:-"AIME"}
-BACKBONE=${BACKBONE:-"Qwen2.5-Math-1.5B"}
+TASK=${TASK:-"MATH"}
+BACKBONE=${BACKBONE:-"Qwen3-4B-Base"}
 CLIP_HIGH=${CLIP_HIGH:-"false"}
 CLIP_SPECIFIED=${CLIP_SPECIFIED:-"false"}
 CLIP_VALUE=${CLIP_VALUE:-""}
@@ -150,8 +150,8 @@ fi
 
 # Set EPISODE
 EPISODE=10
-DATA_TRAIN_BATCH_SIZE=8
-N_VOTES_PER_PROMPT=64
+DATA_TRAIN_BATCH_SIZE=32
+N_VOTES_PER_PROMPT=32
 N_SAMPLES_PER_PROMPT=32
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT
 MICRO_BATCH_SIZE=2        # Increase micro batch size
@@ -257,7 +257,7 @@ python -m verl.trainer.main_ppo \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  algorithm.diversity_density_k=8 \
+  algorithm.diversity_density_k=4 \
   algorithm.diversity_density_use_metric=label_accuracies \
   trainer.logger=['console','wandb'] \
   trainer.resume_mode=auto \
@@ -265,7 +265,7 @@ python -m verl.trainer.main_ppo \
   trainer.experiment_name=$LOG_NAME \
   trainer.n_gpus_per_node=8 \
   trainer.nnodes=1 \
-  trainer.save_freq=60 \
+  trainer.save_freq=15 \
   trainer.test_freq=5 \
   trainer.max_actor_ckpt_to_keep=1 \
   trainer.max_critic_ckpt_to_keep=1 \

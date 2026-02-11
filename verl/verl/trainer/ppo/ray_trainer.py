@@ -384,21 +384,22 @@ def compute_advantage(
             elif consistency_rates is not None:
                 p = torch.tensor(consistency_rates, dtype=dtype, device=device)
             else:
-                p = torch.zeros(bs, dtype=dtype, device=device)
+                # No metrics available: default to fallback (p=1 means always use fallback)
+                p = torch.ones(bs, dtype=dtype, device=device)
             
             # Threshold-based selection:
-            # - When p < threshold: deterministically use diversity density (use_diversity = 1)
-            # - When p >= threshold: probabilistically select based on p
+            # - When consistency_ratio > threshold: deterministically use diversity density (use_diversity = 1)
+            # - When consistency_ratio <= threshold: probabilistically select based on p
             uids = data.non_tensor_batch["uid"]
             unique_uids = list(dict.fromkeys(uids))
             uid_to_random = {uid: torch.rand(1, device=device, dtype=dtype).item() for uid in unique_uids}
             random_vals = torch.tensor([uid_to_random[uid] for uid in uids], dtype=dtype, device=device)
             
-            # Below threshold: always use diversity (use_diversity = 1)
-            # Above threshold: use diversity if random > p, else use fallback
-            below_threshold = (p > consistency_threshold).float()
+            # Above threshold: always use diversity (use_diversity = 1)
+            # below threshold: use diversity if random > p, else use fallback
+            above_threshold = (p > consistency_threshold).float()
             probabilistic_selection = (random_vals > p).float()
-            use_diversity = (below_threshold + (1 - below_threshold) * probabilistic_selection).unsqueeze(-1)  # (bs, 1)
+            use_diversity = (above_threshold + (1 - above_threshold) * probabilistic_selection).unsqueeze(-1)  # (bs, 1)
         
         # Blend advantages based on selection
         advantages = use_diversity * div_advantages + (1 - use_diversity) * fallback_advantages
@@ -1238,7 +1239,8 @@ class RayPPOTrainer:
                                 from copy import deepcopy
                                 ttrl_metrics = reward_result["ttrl_info"]
                                 for k, v in ttrl_metrics.items():
-                                    metrics.update({f"train/{k}": v})
+                                    if not k.startswith("_"):  # Skip per-sample arrays
+                                        metrics.update({f"train/{k}": v})
                                 
                                 # Down Sampling
                                 batch = self._select_top_k_per_prompt(batch, self.n_votes_per_prompt, self.n_samples_per_prompt)
@@ -1255,9 +1257,10 @@ class RayPPOTrainer:
                                 )
                                 metrics.update({"train/post_entropy": post_entropy_loss.detach().item()})
                                 
-                                # === NEW: Store answer_types, consistency_rate, accuracy_rate, and label_accuracy for diversity density advantage ===
                                 if "_answer_types" in ttrl_metrics:
                                     batch.non_tensor_batch["answer_types"] = ttrl_metrics["_answer_types"]
+                                if "_oracle_answer_types" in ttrl_metrics:
+                                    batch.non_tensor_batch["oracle_answer_types"] = ttrl_metrics["_oracle_answer_types"]
                                 if "_consistency_rate" in ttrl_metrics:
                                     batch.non_tensor_batch["consistency_rate"] = ttrl_metrics["_consistency_rate"]
                                 if "_accuracy_rate" in ttrl_metrics:
@@ -1323,6 +1326,41 @@ class RayPPOTrainer:
                             metrics["train/diversity_density_ratio"] = float(batch.meta_info["diversity_density_ratio"])
                         if "fallback_ratio" in batch.meta_info:
                             metrics["train/fallback_ratio"] = float(batch.meta_info["fallback_ratio"])
+                        
+                        # === Advantage Bias Diagnostics ===
+                        # Compare TTA advantage (from pseudo-labels) with Oracle advantage (from true labels)
+                        if (
+                            "oracle_answer_types" in batch.non_tensor_batch
+                            and self.config.algorithm.adv_estimator == AdvantageEstimator.PASS_GRPO
+                            and diversity_density_config is not None
+                        ):
+                            try:
+                                oracle_adv, _ = core_algos.compute_pass_grpo_advantage(
+                                    token_level_rewards=batch.batch["token_level_rewards"],
+                                    response_mask=batch.batch["response_mask"],
+                                    index=batch.non_tensor_batch["uid"],
+                                    answer_types=batch.non_tensor_batch["oracle_answer_types"],
+                                    k=diversity_density_config["k"],
+                                )
+                                tta_adv = batch.batch["advantages"]
+                                
+                                # Per-sample scalar advantages
+                                tta_scalar = tta_adv.sum(-1)
+                                oracle_scalar = oracle_adv.sum(-1)
+                                valid = batch.batch["response_mask"].sum(-1) > 0
+                                
+                                if valid.any():
+                                    # Sign match rate: how often TTA and Oracle agree on direction
+                                    sign_match = ((tta_scalar > 0) == (oracle_scalar > 0)).float()
+                                    metrics["diag/adv_sign_match_rate"] = sign_match[valid].mean().item()
+                                    
+                                    # MSE between TTA and Oracle advantages
+                                    metrics["diag/adv_mse"] = ((tta_scalar - oracle_scalar) ** 2)[valid].mean().item()
+                                    
+                                    # Mean bias (positive = TTA overestimates)
+                                    metrics["diag/adv_mean_bias"] = (tta_scalar - oracle_scalar)[valid].mean().item()
+                            except Exception as e:
+                                print(f"Warning: Advantage bias diagnostics failed: {e}")
 
                     # update critic
                     if self.use_critic:
