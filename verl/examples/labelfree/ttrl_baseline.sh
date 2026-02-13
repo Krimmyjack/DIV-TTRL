@@ -1,6 +1,6 @@
 #!/bin/bash
 """
-bash examples/labelfree/math.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+bash examples/labelfree/ttrl_baseline.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --backend fsdp \
     --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/TTRL-Ent0.000/230220/global_step_30/actor \
