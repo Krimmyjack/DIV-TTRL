@@ -343,6 +343,13 @@ class DiversityTTRLRewardManager:
         all_consistency_rates = []
         all_accuracy_rates = []
         all_label_accuracies = []  # Binary indicator of majority vote correctness
+        
+        # === Length analysis accumulators ===
+        # Accumulate response lengths split by majority correctness × positive/negative
+        len_maj_correct_pos = []   # majority正确时，正样本(匹配多数)长度
+        len_maj_correct_neg = []   # majority正确时，负样本(不匹配多数)长度
+        len_maj_wrong_pos = []     # majority错误时，正样本(匹配多数)长度
+        len_maj_wrong_neg = []     # majority错误时，负样本(不匹配多数)长度
 
         for prompt_i in range(prompt_num):
             group_pred_outputs = []
@@ -418,6 +425,23 @@ class DiversityTTRLRewardManager:
             ttrl_metrics["false_positive_rate"] = fp_rate
             ttrl_metrics["false_negative_rate"] = fn_rate
             
+            # === Length analysis for this prompt group ===
+            # Use character length of response as proxy for response length
+            maj_is_correct = (label_accuracy > 0.5)
+            for i in range(self.n_votes_per_prompt):
+                resp_len = len(group_pred_outputs[i])
+                is_pos = base_rewards[i] > 0  # matches majority
+                if maj_is_correct:
+                    if is_pos:
+                        len_maj_correct_pos.append(resp_len)
+                    else:
+                        len_maj_correct_neg.append(resp_len)
+                else:
+                    if is_pos:
+                        len_maj_wrong_pos.append(resp_len)
+                    else:
+                        len_maj_wrong_neg.append(resp_len)
+            
             # Create answer type mapping (hash of answer string -> integer id)
             answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
             
@@ -491,6 +515,17 @@ class DiversityTTRLRewardManager:
         ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
         ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
         ttrl_info["_label_accuracy"] = np.array(training_label_accuracies)
+
+        # === Aggregate length analysis metrics ===
+        ttrl_info["len_maj_correct_pos"] = float(np.mean(len_maj_correct_pos)) if len_maj_correct_pos else 0.0
+        ttrl_info["len_maj_correct_neg"] = float(np.mean(len_maj_correct_neg)) if len_maj_correct_neg else 0.0
+        ttrl_info["len_maj_correct_all"] = float(np.mean(len_maj_correct_pos + len_maj_correct_neg)) if (len_maj_correct_pos or len_maj_correct_neg) else 0.0
+        ttrl_info["len_maj_wrong_pos"]   = float(np.mean(len_maj_wrong_pos)) if len_maj_wrong_pos else 0.0
+        ttrl_info["len_maj_wrong_neg"]   = float(np.mean(len_maj_wrong_neg)) if len_maj_wrong_neg else 0.0
+        ttrl_info["len_maj_wrong_all"]   = float(np.mean(len_maj_wrong_pos + len_maj_wrong_neg)) if (len_maj_wrong_pos or len_maj_wrong_neg) else 0.0
+        ttrl_info["len_overall_pos"]     = float(np.mean(len_maj_correct_pos + len_maj_wrong_pos)) if (len_maj_correct_pos or len_maj_wrong_pos) else 0.0
+        ttrl_info["len_overall_neg"]     = float(np.mean(len_maj_correct_neg + len_maj_wrong_neg)) if (len_maj_correct_neg or len_maj_wrong_neg) else 0.0
+        ttrl_info["len_overall_all"]     = float(np.mean(len_maj_correct_pos + len_maj_correct_neg + len_maj_wrong_pos + len_maj_wrong_neg))
 
         print("\n=== TTRL Training Metrics Summary ===")
         for k, v in all_ttrl_metrics.items():

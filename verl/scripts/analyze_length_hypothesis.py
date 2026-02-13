@@ -19,10 +19,14 @@ Usage:
 
 import argparse
 import json
+import multiprocessing
 import os
 import sys
 from collections import Counter, defaultdict
 from functools import partial
+
+# Fix: CUDA cannot re-initialize in forked subprocess
+multiprocessing.set_start_method("spawn", force=True)
 
 import numpy as np
 
