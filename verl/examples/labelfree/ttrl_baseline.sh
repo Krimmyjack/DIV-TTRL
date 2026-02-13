@@ -1,7 +1,15 @@
 #!/bin/bash
-
+"""
+bash examples/labelfree/ttrl_baseline.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
+    --backend fsdp \
+    --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/TTRL-Ent0.000/230220/global_step_30/actor \
+    --hf_model_path /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
+    --target_dir /root/autodl-tmp/model/math_step_30_grpo
+"""
+export WANDB_ENTITY=2691454060-ucla
 # === TTRL Training Script ===
-# Usage: ./ttrl_baseline.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
+# Usage: ./evol_rl_no_embedding.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
 #
 # Parameters:
 #   --task      Task name (default: AIME-TTT)
@@ -13,16 +21,18 @@
 #               - Not specified: use default 0.2
 #               - Specified without value: use 0.28
 #               - Specified with value: use that value
+#   --ent       Entropy regularization coefficient (float), e.g. 0.000/0.001/0.003 (default: 0.000)
 #   --temp      Temperature parameter (default: 1.0)
 #               Controls generation randomness, typically range 0.1-2.0
 #   -h, --help  Show help information
 #
 # Examples:
-#   ./ttrl_baseline.sh                                    # Use default parameters
-#   ./ttrl_baseline.sh --task MATH                   # Specify task
-#   ./ttrl_baseline.sh --task AIME --backbone Qwen3-4B-Base  # Specify task and model
-#   ./ttrl_baseline.sh --clip-high                       # High clip ratio mode
-#   ./ttrl_baseline.sh --temp 0.8                        # Set temperature parameter
+#   ./evol_rl_no_embedding.sh                                    # Use default parameters
+#   ./evol_rl_no_embedding.sh --task MATH                   # Specify task
+#   ./evol_rl_no_embedding.sh --task AIME --backbone Qwen3-4B-Base  # Specify task and model
+#   ./evol_rl_no_embedding.sh --clip-high                       # High clip ratio mode
+#   ./evol_rl_no_embedding.sh --temp 0.8                        # Set temperature parameter
+#
 # =======================
 
 #export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -84,7 +94,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --task      Task name (default: AIME)"
             echo "  --backbone  Backbone model (default: Qwen3-4B-Base)"
             echo "  --clip-high[=VAL] set clip ratio: not specified=0.2; flag only=0.28; with value use that value"
-            echo "  --ent       Entropy regularization coefficient (float), e.g. 0.000/0.001/0.003 (default: 0.000)"
+            echo "  --ent       Entropy regularization coefficient (float), e.g. 0.000/0.001/0.005 (default: 0.000)"
             echo "  --temp      Temperature parameter (float), e.g. 0.6/0.8/1.0 (default: 1.0)"
             echo "  -h, --help  Show help information"
             exit 0
@@ -105,27 +115,43 @@ CLIP_MODE=${CLIP_MODE:-""}
 ENT=${ENT:-"0.000"}
 TEMP=${TEMP:-"1.0"}
 
+## ENT as numerical coefficient, no longer perform boolean normalization
 
+
+
+# Set entropy coefficient (numerical) based on --ent
+ENTROPY_COEFF=$ENT
 RAW_TASK="$TASK"
 if [ "$RAW_TASK" = "math_train" ]; then
   TASK="MATH-TTT"
 else
   TASK="$TASK-TTT"
 fi
+
+pkill -f "python.*main_ppo" || true
+pkill -f "python.*main_dapo" || true
+pkill -f "multiprocessing.spawn" || true
+pkill -f "test_three_datasets.sh" || true
+pkill -f "python.*scripts.model_merger" || true
+ray stop --force 2>/dev/null || true
+sleep 2
+echo "========================="
+
 # ------------------------------------------------------------
 
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-ADVANTAGE="pass_grpo"
+ADVANTAGE="grpo"
 
-echo "=== Configuration Information ==="
+echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"
 echo "Backbone model: $BACKBONE"
-echo "==============================="
+echo "Advantage estimator: $ADVANTAGE"
+echo "====================================="
 
 # Set K value
-K=3
+K=4
 MAX_PROMPT_LENGTH=1024
 MAX_RESPONSE_LENGTH=$((1024 * $K))
 # Pre-calculate required values to avoid type errors - use arithmetic expansion to ensure numerical type
@@ -135,6 +161,46 @@ if [ "$K" -gt 13 ]; then
   N=4
 else
   N=16
+fi
+
+# Set EPISODE
+EPISODE=8
+DATA_TRAIN_BATCH_SIZE=32
+N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
+N_SAMPLES_PER_PROMPT=32 # Keep training sample count
+MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
+MICRO_BATCH_SIZE=2 # Increase micro batch to better utilize GPU
+
+DATA_LOCAL_DIR="data"
+# Parse backbone model path and safe name (avoid directory names containing slashes)
+CHAT_TEMPLATE=""
+if [[ "$BACKBONE" == *"/"* ]]; then
+  BACKBONE_PATH="$BACKBONE"
+  BACKBONE_NAME="${BACKBONE##*/}"
+else
+  BACKBONE_PATH="/root/autodl-tmp/model/${BACKBONE}"
+  BACKBONE_NAME="$BACKBONE"
+fi
+
+echo "Parsed model path: $BACKBONE_PATH"
+echo "Parsed model name: $BACKBONE_NAME"
+
+MODEL="${TASK}-${BACKBONE_NAME}"
+
+EXPERIMENT="TTRL"
+
+# Set clip_ratio_high value and experiment name suffix
+if [ "$CLIP_SPECIFIED" = "true" ]; then
+  if [ -n "$CLIP_VALUE" ]; then
+    CLIP_RATIO_HIGH=$CLIP_VALUE
+  else
+    CLIP_RATIO_HIGH=0.28
+  fi
+  if [ "$CLIP_HIGH" = "true" ]; then
+    EXPERIMENT="${EXPERIMENT}-ClipHigh"
+  fi
+else
+  CLIP_RATIO_HIGH=0.2
 fi
 
 # if RAW_TASK is math_train, use our preprocessed parquet; else follow original logic
@@ -148,65 +214,56 @@ else
   fi
 fi
 
-# Set EPISODE
-EPISODE=10
-DATA_TRAIN_BATCH_SIZE=32
-N_VOTES_PER_PROMPT=32
-N_SAMPLES_PER_PROMPT=32
-MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT
-MICRO_BATCH_SIZE=2        # Increase micro batch size
-
-DATA_LOCAL_DIR="./data"
-# Parse backbone model path and safe name (avoid directory names containing slashes)
-if [[ "$BACKBONE" == *"/"* ]]; then
-  BACKBONE_PATH="$BACKBONE"
-  BACKBONE_NAME="${BACKBONE##*/}"
-else
-  BACKBONE_PATH="/root/autodl-tmp/model/${BACKBONE}"
-  BACKBONE_NAME="$BACKBONE"
-fi
-
-echo "Parsed model path: $BACKBONE_PATH"
-echo "Parsed model name: $BACKBONE_NAME"
-
-MODEL="${TASK}-${BACKBONE_NAME}"
-EXPERIMENT="TTRL"
-
-# Set clip_ratio_high value and experiment name suffix
-if [ "$CLIP_SPECIFIED" = "true" ]; then
-  if [ -n "$CLIP_VALUE" ]; then
-    CLIP_RATIO_HIGH=$CLIP_VALUE
-  else
-    CLIP_RATIO_HIGH=0.28
-  fi
-  if [ "$CLIP_HIGH" = "true" ]; then
-    EXPERIMENT="${EXPERIMENT}-clip-high"
-  fi
-else
-  CLIP_RATIO_HIGH=0.2
-fi
-
-# Set entropy coefficient (numerical) based on --ent and append specific coefficient to experiment name
-ENTROPY_COEFF=$ENT
-if [ "$ENT" != "0.000" ]; then
-  EXPERIMENT="${EXPERIMENT}-Ent${ENTROPY_COEFF}"
-fi
-
 # Set WANDB_PROJECT based on TASK
 if [ "$RAW_TASK" = "math_train" ]; then
   WANDB_PROJECT="TTRL_MATH_TRAIN"
   EXPERIMENT="${EXPERIMENT}-MATH_TRAIN"
 elif [ "$TASK" = "AIME-TTT" ]; then
   WANDB_PROJECT="TTRL-AIME24"
+elif [ "$TASK" = "AMC-TTT" ]; then
+  WANDB_PROJECT="TTRL-AMC"
 else
   WANDB_PROJECT="TTRL-MATH500"
 fi
-LOG_NAME="${EXPERIMENT}-${MODEL}"
-OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}"
 
-# ------------------------------------------------------------
+
+if [ "$CLIP_HIGH" = "true" ]; then
+  EXPERIMENT="${EXPERIMENT}-ClipHigh"
+fi
+
+# Always include specific entropy coefficient in experiment name for ablation tracking
+EXPERIMENT="${EXPERIMENT}-Ent${ENTROPY_COEFF}"
+
+
+LOG_NAME="${EXPERIMENT}-${MODEL}"
+OUTPUT_DIR="/root/autodl-tmp/model/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}/${TIME_TAG}"
+
+
+
+echo "=== TTRL Training Configuration ==="
+echo "Task: $TASK"
+echo "Backbone model: $BACKBONE"
+echo "Advantage estimator: $ADVANTAGE"
+# Print entropy regularization switch (based on whether coefficient is 0)
+if [[ "$ENTROPY_COEFF" != "0" && "$ENTROPY_COEFF" != "0.0" && "$ENTROPY_COEFF" != "0.00" && "$ENTROPY_COEFF" != "0.000" ]]; then
+  ENT_ENABLED="true"
+else
+  ENT_ENABLED="false"
+fi
+echo "Enable entropy regularization: $ENT_ENABLED"
+echo "Entropy coefficient: $ENTROPY_COEFF"
+echo "Output directory: $OUTPUT_DIR"
+echo "Experiment name: $LOG_NAME"
+echo "==============================="
+
+  # reward_model.reward_manager=diversity_ttrl \
+  # reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  # reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
+  # reward_model.reward_kwargs.mode="train" \
+
+# # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
-  reward_model.reward_manager=truelabel_ttrl \
+  reward_model.reward_manager=ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   reward_model.reward_kwargs.mode="train" \
@@ -223,9 +280,10 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.clip_ratio_high=$CLIP_RATIO_HIGH \
-  actor_rollout_ref.actor.entropy_coeff=$ENTROPY_COEFF \
   actor_rollout_ref.actor.optim.lr=5e-7 \
+  actor_rollout_ref.actor.entropy_coeff=$ENTROPY_COEFF \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
   actor_rollout_ref.actor.optim.warmup_style='cosine' \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -257,110 +315,24 @@ python -m verl.trainer.main_ppo \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
+  algorithm.diversity_density_fallback=grpo \
   algorithm.diversity_density_k=4 \
-  algorithm.diversity_density_use_metric=label_accuracies \
+  algorithm.diversity_density_use_metric=consistency_rate \
+  algorithm.consistency_threshold=0.8 \
   trainer.logger=['console','wandb'] \
-  trainer.resume_mode=auto \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
   trainer.n_gpus_per_node=8 \
   trainer.nnodes=1 \
   trainer.save_freq=15 \
   trainer.test_freq=5 \
-  trainer.max_actor_ckpt_to_keep=1 \
-  trainer.max_critic_ckpt_to_keep=1 \
+  trainer.max_actor_ckpt_to_keep=0 \
+  trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_epochs=$EPISODE "$@"
 
 echo "=== Training Completed ==="
-echo "Task: $TASK"
-echo "Backbone model: $BACKBONE"
 echo "Output directory: $OUTPUT_DIR"
-echo "========================"
-
-# === Automatic Evaluation Module ===
-echo ""
-echo "🚀 Starting automatic evaluation process..."
-echo "========================================="
-
-# 1. Detect latest checkpoint
-echo "📁 Detecting latest checkpoint..."
-LATEST_CHECKPOINT=""
-if [ -d "$OUTPUT_DIR" ]; then
-    # Find latest global_step directory
-    LATEST_CHECKPOINT=$(find "$OUTPUT_DIR" -name "global_step_*" -type d | sort -V | tail -n 1)
-    if [ -n "$LATEST_CHECKPOINT" ]; then
-        echo "✅ Found latest checkpoint: $LATEST_CHECKPOINT"
-    else
-        echo "❌ No checkpoint found, skipping evaluation"
-        exit 0
-    fi
-else
-    echo "❌ Output directory does not exist, skipping evaluation"
-    exit 0
-fi
-
-# 2. Build model merge parameters
-echo "🔧 Building model merge parameters..."
-ACTOR_DIR="${LATEST_CHECKPOINT}/actor"
-HF_MODEL_PATH="$BACKBONE_PATH"
-
-# Build target directory name
-TARGET_MODEL_NAME="${MODEL}-${EXPERIMENT}"
-TARGET_DIR="models/${TARGET_MODEL_NAME}"
-# Remove slashes from model name when uploading to HF
-SANITIZED_TARGET_MODEL_NAME="${TARGET_MODEL_NAME//\//-}"
-HF_UPLOAD_PATH="username/${SANITIZED_TARGET_MODEL_NAME}"
-
-echo "Model merge configuration:"
-echo "  - Local directory: $ACTOR_DIR"
-echo "  - HF model path: $HF_MODEL_PATH"
-echo "  - Target directory: $TARGET_DIR"
-echo "  - HF upload path: $HF_UPLOAD_PATH"
-
-# 3. Execute model merge
-echo ""
-echo "🔄 Starting model merge..."
-python -m scripts.model_merger \
-    --backend fsdp \
-    --local_dir "$ACTOR_DIR" \
-    --hf_model_path "$HF_MODEL_PATH" \
-    --target_dir "$TARGET_DIR" 
-# python -m scripts.model_merger \
-#     --backend fsdp \
-#     --local_dir "$ACTOR_DIR" \
-#     --hf_model_path "$HF_MODEL_PATH" \
-#     --target_dir "$TARGET_DIR" \
-    # --hf_upload_path "$HF_UPLOAD_PATH"
-MERGE_RC=$?
-
-MERGE_OK=0
-if [ -d "$TARGET_DIR" ]; then
-  if compgen -G "$TARGET_DIR/*.safetensors" > /dev/null || [ -f "$TARGET_DIR/tokenizer.json" ]; then
-    MERGE_OK=1
-  fi
-fi
-if [ $MERGE_OK -eq 0 ]; then
-    echo "✅ Model merge successful"
-else
-    echo "❌ Model merge failed, skipping evaluation"
-    exit 1
-fi
-
-# 4. Execute automatic evaluation
-echo ""
-echo "🧪 Starting automatic evaluation..."
-echo "Evaluating model: $TARGET_DIR"
-
-# Call test script
-./test_three_datasets.sh --model_path "$TARGET_DIR" --backbone "$BACKBONE"
-
-if [ $? -eq 0 ]; then
-    echo "✅ Automatic evaluation completed"
-else
-    echo "❌ Automatic evaluation failed"
-    exit 1
-fi
-
-
-
+echo "Project name: $WANDB_PROJECT"
+echo "Experiment name: $LOG_NAME"
+# echo "========================"
