@@ -209,7 +209,7 @@ python -m verl.trainer.main_ppo \
   reward_model.reward_manager=truelabel_ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
-  reward_model.reward_kwargs.mode="train" \
+  reward_model.reward_kwargs.mode="test_minority" \
   data.train_files=["$DATA_LOCAL_DIR/$TASK/train-simplerl.parquet"] \
   data.val_files=["$DATA_LOCAL_DIR/$TASK/test-simplerl.parquet"] \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
@@ -267,8 +267,8 @@ python -m verl.trainer.main_ppo \
   trainer.nnodes=1 \
   trainer.save_freq=15 \
   trainer.test_freq=5 \
-  trainer.max_actor_ckpt_to_keep=1 \
-  trainer.max_critic_ckpt_to_keep=1 \
+  trainer.max_actor_ckpt_to_keep=0 \
+  trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_epochs=$EPISODE "$@"
 
