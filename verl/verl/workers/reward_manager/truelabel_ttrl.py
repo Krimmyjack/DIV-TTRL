@@ -310,6 +310,9 @@ class TrueLabelTTRLRewardManager:
                 training_answer_types.append(all_answer_types[global_idx])
         
         ttrl_info["_answer_types"] = np.array(training_answer_types)
+        
+        # Store per-prompt label_accuracy for test_minority mode
+        ttrl_info["_per_prompt_label_accuracy"] = all_ttrl_metrics.get("label_accuracy", [])
 
         print("\n=== True Label TTRL Training Metrics Summary ===")
         for k, v in all_ttrl_metrics.items():
@@ -426,8 +429,25 @@ class TrueLabelTTRLRewardManager:
         print(f"Data size: {len(data)}")
         print("=" * 50)
 
-        if self.mode == "train":
+        if self.mode in ("train", "test_minority"):
             reward_tensor, reward_extra_info, ttrl_info = self._compute_ttrl_reward(data)
+            if self.mode == "test_minority":
+                # Build per-sample zero_advantage_mask:
+                # For each prompt, if true label != majority answer (label_accuracy == 0),
+                # set mask=1 for all responses of that prompt (advantage will be zeroed).
+                prompt_num = len(data) // self.n_votes_per_prompt
+                zero_mask = np.zeros(prompt_num * self.n_samples_per_prompt, dtype=np.float32)
+                # Retrieve per-prompt label_accuracy from ttrl_info
+                per_prompt_label_acc = ttrl_info.get("_per_prompt_label_accuracy", [])
+                for prompt_i in range(prompt_num):
+                    if prompt_i < len(per_prompt_label_acc) and per_prompt_label_acc[prompt_i] == 0.0:
+                        for j in range(self.n_samples_per_prompt):
+                            zero_mask[prompt_i * self.n_samples_per_prompt + j] = 1.0
+                ttrl_info["_zero_advantage_mask"] = zero_mask
+                n_zeroed_prompts = int(sum(1 for acc in per_prompt_label_acc if acc == 0.0))
+                n_zeroed_samples = int(zero_mask.sum())
+                print(f"[test_minority] Zeroing advantage for {n_zeroed_prompts}/{prompt_num} prompts "
+                      f"({n_zeroed_samples}/{len(zero_mask)} samples) where true label != majority")
         elif self.mode == "eval":
             reward_tensor, reward_extra_info, ttrl_info = self._compute_eval_reward(data)
         else:

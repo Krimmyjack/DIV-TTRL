@@ -1297,6 +1297,8 @@ class RayPPOTrainer:
                                     batch.non_tensor_batch["accuracy_rate"] = ttrl_metrics["_accuracy_rate"]
                                 if "_label_accuracy" in ttrl_metrics:
                                     batch.non_tensor_batch["label_accuracy"] = ttrl_metrics["_label_accuracy"]
+                                if "_zero_advantage_mask" in ttrl_metrics:
+                                    batch.non_tensor_batch["zero_advantage_mask"] = ttrl_metrics["_zero_advantage_mask"]
                                 
                         except Exception as e:
                             print(f"Error in reward_fn: {e}")
@@ -1351,6 +1353,19 @@ class RayPPOTrainer:
                             diversity_density_config=diversity_density_config,
                         )
                         
+                        # Apply zero_advantage_mask if present (test_minority mode)
+                        if "zero_advantage_mask" in batch.non_tensor_batch:
+                            zero_mask = torch.tensor(
+                                batch.non_tensor_batch["zero_advantage_mask"],
+                                dtype=torch.float32,
+                                device=batch.batch["advantages"].device
+                            ).unsqueeze(-1)  # (batch_size, 1)
+                            # Where mask == 1, zero out the advantage
+                            batch.batch["advantages"] = batch.batch["advantages"] * (1.0 - zero_mask)
+                            n_zeroed = int(zero_mask.sum().item())
+                            print(f"[test_minority] Applied zero_advantage_mask: zeroed {n_zeroed}/{len(zero_mask)} samples")
+                            metrics["train/test_minority_zeroed_ratio"] = float(zero_mask.mean().item())
+
                         # Log diversity density usage statistics if available
                         if "diversity_density_ratio" in batch.meta_info:
                             metrics["train/diversity_density_ratio"] = float(batch.meta_info["diversity_density_ratio"])

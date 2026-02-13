@@ -243,6 +243,23 @@ class TTRLRewardManager:
                     group_extra_info.append(extra_info)
                 rewards, ttrl_metrics = test_time_train_metrics(group_pred_outputs, group_labels, task=task, extra_info=group_extra_info)
 
+                # === Compute FP/FN rates (pseudo-label vs ground truth) ===
+                ground_truth = group_labels[0]
+                true_rewards, _ = auto_verify(
+                    task, group_pred_outputs, [ground_truth] * len(group_pred_outputs),
+                    extra_info=group_extra_info
+                )
+                # false_positive_rate: fraction of pseudo-positive samples that are actually wrong
+                n_pseudo_pos = sum(1 for r in rewards if r > 0)
+                n_false_pos = sum(1 for r, t in zip(rewards, true_rewards) if r > 0 and t == 0)
+                fp_rate = n_false_pos / n_pseudo_pos if n_pseudo_pos > 0 else 0.0
+                # false_negative_rate: fraction of pseudo-negative samples that are actually correct
+                n_pseudo_neg = sum(1 for r in rewards if r == 0)
+                n_false_neg = sum(1 for r, t in zip(rewards, true_rewards) if r == 0 and t > 0)
+                fn_rate = n_false_neg / n_pseudo_neg if n_pseudo_neg > 0 else 0.0
+                ttrl_metrics["false_positive_rate"] = fp_rate
+                ttrl_metrics["false_negative_rate"] = fn_rate
+
                 # === Calculate strategy entropy ===
                 current_group_data = data[prompt_i * self.n_votes_per_prompt:(prompt_i + 1) * self.n_votes_per_prompt]
                 strategy_entropy = self._compute_strategy_entropy(current_group_data)
