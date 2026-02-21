@@ -28,6 +28,7 @@ advantage computation.
 
 from collections import Counter, defaultdict
 from functools import partial
+import random
 import numpy as np
 import torch
 
@@ -50,6 +51,7 @@ class TrueLabelTTRLRewardManager:
         n_samples_per_prompt: int = 1,
         mode: str = "eval",
         eval_n_samples: int = 1,
+        noise_rate: float = 0.0,
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -58,6 +60,7 @@ class TrueLabelTTRLRewardManager:
         self.n_samples_per_prompt = n_samples_per_prompt
         self.mode = mode
         self.eval_n_samples = eval_n_samples
+        self.noise_rate = noise_rate
         self.debug_mode = num_examine > 0
 
         assert n_votes_per_prompt >= n_samples_per_prompt, (
@@ -69,7 +72,8 @@ class TrueLabelTTRLRewardManager:
             "TrueLabelTTRLRewardManager initialized with "
             f"n_votes_per_prompt {n_votes_per_prompt}, "
             f"n_samples_per_prompt {n_samples_per_prompt}, "
-            f"eval_n_samples {eval_n_samples}"
+            f"eval_n_samples {eval_n_samples}, "
+            f"noise_rate {noise_rate}"
         )
 
     def _data_source_to_task(self, data_source):
@@ -114,6 +118,54 @@ class TrueLabelTTRLRewardManager:
         response_str = self.tokenizer.decode(valid_response_idx, skip_special_tokens=False)
 
         return prompt_str, response_str, valid_response_length
+
+    def _compute_strategy_entropy(self, data_items):
+        """Compute normalized negative log-likelihood (strategy entropy) for a group."""
+        if not data_items:
+            return 0.0
+
+        log_probs_list = []
+        response_lengths = []
+
+        for data_item in data_items:
+            if not hasattr(data_item, "batch") or "old_log_probs" not in data_item.batch:
+                continue
+
+            batch = data_item.batch
+            attention_mask = batch.get("attention_mask", None)
+            if attention_mask is None or len(attention_mask) <= batch["prompts"].shape[-1]:
+                continue
+
+            prompt_length = batch["prompts"].shape[-1]
+            response_length_val = attention_mask[prompt_length:].sum().item()
+            if response_length_val <= 0:
+                continue
+
+            old_log_probs = batch["old_log_probs"]
+            if not isinstance(old_log_probs, torch.Tensor) or old_log_probs.numel() == 0:
+                continue
+
+            log_probs_length = old_log_probs.shape[-1]
+            if log_probs_length == response_length_val:
+                response_log_probs = old_log_probs
+            elif log_probs_length == prompt_length + response_length_val:
+                response_log_probs = old_log_probs[prompt_length:prompt_length + response_length_val]
+            elif log_probs_length > response_length_val:
+                response_log_probs = old_log_probs[-response_length_val:]
+            else:
+                continue
+
+            log_probs_list.append(response_log_probs.sum().item())
+            response_lengths.append(response_length_val)
+
+        if not log_probs_list:
+            return 0.0
+
+        log_probs_array = np.array(log_probs_list)
+        response_lengths_array = np.array(response_lengths)
+        neg_log_likelihoods = -log_probs_array / response_lengths_array
+
+        return float(np.mean(neg_log_likelihoods))
 
     def compute_post_ttrl_metrics(self, data: DataProto):
         """Compute post-TTRL training evaluation metrics."""
@@ -168,9 +220,18 @@ class TrueLabelTTRLRewardManager:
                 post_ttrl_info[k] = v
         return post_ttrl_info
 
-    def _compute_ttrl_reward(self, data: DataProto):
-        """Compute rewards using ground truth labels (not pseudo labels)."""
+    def _compute_ttrl_reward(self, data: DataProto, noised_prompt_indices: set = None):
+        """Compute rewards using ground truth labels (not pseudo labels).
+        
+        Args:
+            noised_prompt_indices: If provided, for these prompt indices, use a random
+                wrong answer as the label instead of true ground truth (test_noise mode).
+        """
+        if noised_prompt_indices is None:
+            noised_prompt_indices = set()
         print("Starting TRUE LABEL reward calculation...")
+        if noised_prompt_indices:
+            print(f"[test_noise] {len(noised_prompt_indices)} prompts will use noised (wrong) labels")
 
         reward_extra_info = defaultdict(list)
         ttrl_info = {}
@@ -190,8 +251,11 @@ class TrueLabelTTRLRewardManager:
         all_ttrl_metrics = defaultdict(list)
         scores = [0.0 for _ in range(len(data))]
         
-        # Collect answer_types for PASS_GRPO advantage computation
+        # Collect answer_types and per-sample arrays for PASS_GRPO advantage computation
         all_answer_types = []
+        all_consistency_rates = []
+        all_accuracy_rates = []
+        all_label_accuracies = []
 
         for prompt_i in range(prompt_num):
             group_pred_outputs = []
@@ -225,11 +289,31 @@ class TrueLabelTTRLRewardManager:
             if len(set(group_labels)) != 1:
                 print(f"WARNING: Ground truth not unique in prompt group {prompt_i}, using first label")
             
+            # For test_noise mode: replace ground truth with a random wrong answer
+            effective_label = ground_truth
+            is_noised = prompt_i in noised_prompt_indices
+            if is_noised:
+                # Extract final answers to pick a wrong one
+                noise_answers = self._extract_final_answers(task, group_pred_outputs)
+                wrong_answers = [a for a in set(noise_answers) if a != ground_truth and a is not None and a != ""]
+                if wrong_answers:
+                    effective_label = random.choice(wrong_answers)
+                else:
+                    # All answers match ground truth or are empty; generate a clearly wrong label
+                    effective_label = "NOISE_WRONG_ANSWER_" + str(random.randint(0, 99999))
+                print(f"[test_noise] Prompt {prompt_i}: true='{ground_truth}' -> noised='{effective_label}'")
+            
             true_rewards, _ = auto_verify(
-                task, group_pred_outputs, [ground_truth] * len(group_pred_outputs),
+                task, group_pred_outputs, [effective_label] * len(group_pred_outputs),
                 extra_info=group_extra_info
             )
             
+            # Compute strategy entropy for this group
+            current_group_data = data[prompt_i * self.n_votes_per_prompt : (prompt_i + 1) * self.n_votes_per_prompt]
+            strategy_entropy = self._compute_strategy_entropy(current_group_data)
+            if self.debug_mode and strategy_entropy > 0:
+                print(f"    Strategy entropy: H_ttrl={strategy_entropy:.3f} (normalized negative log-likelihood)")
+
             # Compute metrics directly (no need for test_time_train_metrics which uses majority voting)
             ground_truth_ratio = sum(true_rewards) / len(true_rewards)
 
@@ -250,6 +334,10 @@ class TrueLabelTTRLRewardManager:
                 task, [majority_answer], [ground_truth], extra_info=[group_extra_info[0]]
             )[0][0] else 0.0
 
+            # Compute diversity_ratio: unique answers / total answers
+            unique_answers = len(set(final_answers))
+            diversity_ratio = unique_answers / len(final_answers) if len(final_answers) > 0 else 0.0
+
             # Compute majority_rewards: which samples match majority vote (pseudo-label perspective)
             majority_rewards, _ = auto_verify(
                 task, group_pred_outputs, [majority_answer] * len(group_pred_outputs),
@@ -266,13 +354,21 @@ class TrueLabelTTRLRewardManager:
             n_false_neg = sum(1 for m, t in zip(majority_rewards, true_rewards) if m == 0 and t > 0)
             fn_rate = n_false_neg / n_pseudo_neg if n_pseudo_neg > 0 else 0.0
 
+            # Store per-sample arrays for downstream advantage computation
+            for i in range(self.n_votes_per_prompt):
+                all_consistency_rates.append(majority_ratio)
+                all_accuracy_rates.append(ground_truth_ratio)
+                all_label_accuracies.append(label_accuracy)
+
             ttrl_metrics = {
                 "ground_truth_ratio": ground_truth_ratio,
                 f"pass@{len(group_pred_outputs)}": 1.0 if sum(true_rewards) >= 1 else 0.0,
                 "label_accuracy": label_accuracy,
                 "majority_ratio": majority_ratio,
+                "diversity_ratio": diversity_ratio,
                 "false_positive_rate": fp_rate,
                 "false_negative_rate": fn_rate,
+                "neg_log_likelihood": strategy_entropy,
             }
 
             for k, v in ttrl_metrics.items():
@@ -302,14 +398,23 @@ class TrueLabelTTRLRewardManager:
 
         data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=data.batch["prompts"].device)
         
-        # Store answer_types for PASS_GRPO (only for training samples)
+        # Store per-sample arrays for PASS_GRPO and diagnostics (only for training samples)
         training_answer_types = []
+        training_consistency_rates = []
+        training_accuracy_rates = []
+        training_label_accuracies = []
         for prompt_i in range(prompt_num):
             for i in range(self.n_samples_per_prompt):
                 global_idx = prompt_i * self.n_votes_per_prompt + i
                 training_answer_types.append(all_answer_types[global_idx])
+                training_consistency_rates.append(all_consistency_rates[global_idx])
+                training_accuracy_rates.append(all_accuracy_rates[global_idx])
+                training_label_accuracies.append(all_label_accuracies[global_idx])
         
         ttrl_info["_answer_types"] = np.array(training_answer_types)
+        ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
+        ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
+        ttrl_info["_label_accuracy"] = np.array(training_label_accuracies)
         
         # Store per-prompt label_accuracy for test_minority mode
         ttrl_info["_per_prompt_label_accuracy"] = all_ttrl_metrics.get("label_accuracy", [])
@@ -406,9 +511,14 @@ class TrueLabelTTRLRewardManager:
                 extra_info=group_extra_info
             )
             
+            # Compute strategy entropy for eval group
+            current_group_data = data[prompt_i * self.eval_n_samples : (prompt_i + 1) * self.eval_n_samples]
+            strategy_entropy = self._compute_strategy_entropy(current_group_data)
+
             ttrl_metrics = {
                 "ground_truth_ratio": sum(true_rewards) / len(true_rewards),
                 f"pass@{len(group_pred_outputs)}": 1.0 if sum(true_rewards) >= 1 else 0.0,
+                "neg_log_likelihood": strategy_entropy,
             }
 
             for k, v in ttrl_metrics.items():
@@ -448,6 +558,17 @@ class TrueLabelTTRLRewardManager:
                 n_zeroed_samples = int(zero_mask.sum())
                 print(f"[test_minority] Zeroing advantage for {n_zeroed_prompts}/{prompt_num} prompts "
                       f"({n_zeroed_samples}/{len(zero_mask)} samples) where true label != majority")
+        elif self.mode == "test_noise":
+            # Randomly select noise_rate fraction of prompts and use wrong labels
+            prompt_num = len(data) // self.n_votes_per_prompt
+            n_noised = max(1, int(prompt_num * self.noise_rate))
+            noised_indices = set(random.sample(range(prompt_num), min(n_noised, prompt_num)))
+            print(f"[test_noise] Noising {len(noised_indices)}/{prompt_num} prompts "
+                  f"(noise_rate={self.noise_rate:.2f})")
+            reward_tensor, reward_extra_info, ttrl_info = self._compute_ttrl_reward(
+                data, noised_prompt_indices=noised_indices
+            )
+            ttrl_info["noise_rate_actual"] = len(noised_indices) / prompt_num
         elif self.mode == "eval":
             reward_tensor, reward_extra_info, ttrl_info = self._compute_eval_reward(data)
         else:
