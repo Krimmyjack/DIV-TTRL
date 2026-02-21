@@ -84,6 +84,7 @@ class AdvantageEstimator(str, Enum):
     DIVERSITY_DENSITY = "diversity_density"
     DIVERSITY_DENSITY_HYBRID = "diversity_density_hybrid"
     PASS_GRPO = "pass_grpo"
+    SELECTIVE_PASSK = "selective_passk"
 
 
 @dataclass
@@ -303,7 +304,7 @@ def compute_advantage(
         if diversity_density_config is None:
             diversity_density_config = {}
         
-        k = diversity_density_config.get("k", 8)
+        k = diversity_density_config.get("k", 4)
         fallback = diversity_density_config.get("fallback_estimator", "pass_grpo")
         
         # Get self-consistency rate per prompt from non_tensor_batch
@@ -467,6 +468,81 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.SELECTIVE_PASSK:
+        # ========== [2026-02-19 NEW] ==========
+        # Selective Pass@k: compute pass_grpo advantage, but only update prompts
+        # whose consistency_rate > threshold. Others get zero advantage.
+        # =======================================
+        if diversity_density_config is None:
+            diversity_density_config = {}
+        
+        k = diversity_density_config.get("k", 4)
+        threshold = diversity_density_config.get("selective_passk_threshold", 0.7)
+        
+        # Need answer_types from non_tensor_batch
+        if "answer_types" not in data.non_tensor_batch:
+            raise ValueError("SELECTIVE_PASSK requires 'answer_types' in data.non_tensor_batch")
+        
+        # 1. Compute standard pass_grpo advantages for all samples
+        advantages, returns = core_algos.compute_pass_grpo_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            answer_types=data.non_tensor_batch["answer_types"],
+            k=k,
+        )
+        
+        # 2. Apply consistency rate threshold gating
+        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+        
+        if consistency_rates is not None:
+            bs = advantages.shape[0]
+            device = advantages.device
+            dtype = advantages.dtype
+            uids = data.non_tensor_batch["uid"]
+            
+            # Build per-prompt consistency rate mapping
+            prompt_consistency = {}
+            for i in range(bs):
+                uid = uids[i]
+                if uid not in prompt_consistency:
+                    prompt_consistency[uid] = consistency_rates[i]
+            
+            # Create mask: 1.0 for prompts with consistency_rate > threshold, 0.0 otherwise
+            select_mask = torch.zeros(bs, 1, dtype=dtype, device=device)
+            for i in range(bs):
+                uid = uids[i]
+                if prompt_consistency[uid] > threshold:
+                    select_mask[i] = 1.0
+            
+            # Zero out advantages for unselected prompts
+            advantages = advantages * select_mask
+            returns = returns * select_mask
+            
+            # Diagnostic metrics
+            num_prompts = len(prompt_consistency)
+            num_selected = sum(1 for cr in prompt_consistency.values() if cr > threshold)
+            num_skipped = num_prompts - num_selected
+            
+            data.meta_info["selective_passk/num_prompts"] = num_prompts
+            data.meta_info["selective_passk/num_selected"] = num_selected
+            data.meta_info["selective_passk/num_skipped"] = num_skipped
+            data.meta_info["selective_passk/select_ratio"] = num_selected / num_prompts if num_prompts > 0 else 0.0
+            data.meta_info["selective_passk/threshold"] = threshold
+            
+            # Log average consistency rate for selected vs skipped
+            selected_crs = [cr for cr in prompt_consistency.values() if cr > threshold]
+            skipped_crs = [cr for cr in prompt_consistency.values() if cr <= threshold]
+            if selected_crs:
+                data.meta_info["selective_passk/avg_selected_consistency"] = sum(selected_crs) / len(selected_crs)
+            if skipped_crs:
+                data.meta_info["selective_passk/avg_skipped_consistency"] = sum(skipped_crs) / len(skipped_crs)
+        else:
+            # No consistency_rate available: behave like standard pass_grpo (no filtering)
+            print("[selective_passk] Warning: consistency_rate not found in non_tensor_batch, falling back to pass_grpo behavior")
+        
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data
@@ -536,6 +612,7 @@ class RayPPOTrainer:
             AdvantageEstimator.DIVERSITY_DENSITY,
             AdvantageEstimator.DIVERSITY_DENSITY_HYBRID,
             AdvantageEstimator.PASS_GRPO,
+            AdvantageEstimator.SELECTIVE_PASSK,
         ]:
             self.use_critic = False
         else:
@@ -1330,6 +1407,7 @@ class RayPPOTrainer:
                             AdvantageEstimator.DIVERSITY_DENSITY,
                             AdvantageEstimator.DIVERSITY_DENSITY_HYBRID,
                             AdvantageEstimator.PASS_GRPO,
+                            AdvantageEstimator.SELECTIVE_PASSK,
                         ]:
                             diversity_density_config = {
                                 "k": getattr(self.config.algorithm, "diversity_density_k", 8),
@@ -1341,6 +1419,9 @@ class RayPPOTrainer:
                                 ),
                                 "consistency_threshold": getattr(
                                     self.config.algorithm, "consistency_threshold", 0.0
+                                ),
+                                "selective_passk_threshold": getattr(
+                                    self.config.algorithm, "selective_passk_threshold", 0.5
                                 ),
                             }
                         
@@ -1420,6 +1501,19 @@ class RayPPOTrainer:
                         # Log diversity density advantage metrics
                         if "diversity/avg_advantage" in batch.meta_info:
                             metrics["train/diversity_avg_adv"] = float(batch.meta_info["diversity/avg_advantage"])
+                        
+                        # Log selective_passk metrics if available
+                        for sp_key in [
+                            "selective_passk/num_prompts",
+                            "selective_passk/num_selected",
+                            "selective_passk/num_skipped",
+                            "selective_passk/select_ratio",
+                            "selective_passk/threshold",
+                            "selective_passk/avg_selected_consistency",
+                            "selective_passk/avg_skipped_consistency",
+                        ]:
+                            if sp_key in batch.meta_info:
+                                metrics[f"train/{sp_key.replace('/', '_')}"] = float(batch.meta_info[sp_key])
 
                     # update critic
                     if self.use_critic:

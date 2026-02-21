@@ -117,7 +117,7 @@ fi
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 
-ADVANTAGE="pass_grpo"
+ADVANTAGE="selective_passk"
 
 echo "=== Configuration Information ==="
 echo "Task: $TASK"
@@ -202,7 +202,7 @@ else
   WANDB_PROJECT="TTRL-MATH500"
 fi
 LOG_NAME="${EXPERIMENT}-${MODEL}"
-OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}"
+OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}-${TIME_TAG}"
 
 # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
