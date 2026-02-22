@@ -3,9 +3,9 @@
 bash examples/labelfree/math.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --backend fsdp \
-    --local_dir /root//autodl-tmp/DIV-TTRL/verl/checkpoints/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/global_step_90/actor \
-    --hf_model_path /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
-    --target_dir /root/autodl-tmp/model/math_step_90
+    --local_dir /root/autodl-tmp/DIV-TTRL/verl/checkpoints/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/TTRL-003309/global_step_30/actor \
+    --hf_model_path /root/autodl-tmp/model/Qwen3-4B-Base \
+    --target_dir /root/autodl-tmp/model/test_minority_low_threshold30
 """
 export WANDB_ENTITY=2691454060-ucla
 # === TTRL Training Script ===

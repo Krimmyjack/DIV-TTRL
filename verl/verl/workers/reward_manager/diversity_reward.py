@@ -384,6 +384,7 @@ class DiversityTTRLRewardManager:
         all_accuracy_rates = []
         all_label_accuracies = []
 
+
         for prompt_i in range(prompt_num):
             start = prompt_i * self.n_votes_per_prompt
             end = start + self.n_votes_per_prompt
@@ -510,6 +511,7 @@ class DiversityTTRLRewardManager:
         ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
         ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
         ttrl_info["_label_accuracy"] = np.array(training_label_accuracies)
+
 
         print("\n=== TTRL Training Metrics Summary ===")
         for k, v in all_ttrl_metrics.items():
