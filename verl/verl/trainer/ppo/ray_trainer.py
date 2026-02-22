@@ -512,7 +512,7 @@ def compute_advantage(
             select_mask = torch.zeros(bs, 1, dtype=dtype, device=device)
             for i in range(bs):
                 uid = uids[i]
-                if prompt_consistency[uid] > threshold:
+                if prompt_consistency[uid] <= threshold:
                     select_mask[i] = 1.0
             
             # Zero out advantages for unselected prompts
@@ -521,7 +521,7 @@ def compute_advantage(
             
             # Diagnostic metrics
             num_prompts = len(prompt_consistency)
-            num_selected = sum(1 for cr in prompt_consistency.values() if cr > threshold)
+            num_selected = sum(1 for cr in prompt_consistency.values() if cr <= threshold)
             num_skipped = num_prompts - num_selected
             
             data.meta_info["selective_passk/num_prompts"] = num_prompts
@@ -531,8 +531,8 @@ def compute_advantage(
             data.meta_info["selective_passk/threshold"] = threshold
             
             # Log average consistency rate for selected vs skipped
-            selected_crs = [cr for cr in prompt_consistency.values() if cr > threshold]
-            skipped_crs = [cr for cr in prompt_consistency.values() if cr <= threshold]
+            selected_crs = [cr for cr in prompt_consistency.values() if cr <= threshold]
+            skipped_crs = [cr for cr in prompt_consistency.values() if cr > threshold]
             if selected_crs:
                 data.meta_info["selective_passk/avg_selected_consistency"] = sum(selected_crs) / len(selected_crs)
             if skipped_crs:
@@ -889,11 +889,8 @@ class RayPPOTrainer:
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
 
-            # Store original inputs
+            # Store original input_ids for later batch decoding (after generation)
             input_ids = test_batch.batch["input_ids"]
-            # TODO: Can we keep special tokens except for padding tokens?
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            sample_inputs.extend(input_texts)
 
             if "multi_modal_inputs" in test_batch.non_tensor_batch.keys():
                 test_gen_batch = test_batch.pop(
@@ -915,6 +912,11 @@ class RayPPOTrainer:
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
+            # Balance validation batch by sequence length to reduce GPU stragglers
+            if self.config.trainer.get("balance_batch", False):
+                _val_metrics = {}
+                self._balance_batch(test_gen_batch, metrics=_val_metrics, logging_prefix="val_seqlen")
+
             # pad to be divisible by dp_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
             test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
@@ -923,9 +925,11 @@ class RayPPOTrainer:
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
             print("validation generation end")
 
-            # Store generated outputs
+            # Batch decode inputs and outputs (much faster than per-item decode)
             output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            input_texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+            output_texts = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+            sample_inputs.extend(input_texts)
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)

@@ -249,47 +249,39 @@ class DiversityTTRLRewardManager:
             f"Length of data {len(data)} should be divisible by n_samples_per_prompt {self.n_samples_per_prompt}"
         )
         prompt_num = len(data) // self.n_samples_per_prompt
+        total_samples = len(data)
         print(f"Computing post-TTRL metrics, {prompt_num} prompts in total...")
+
+        # Batch decode all responses
+        all_response_strs, _, _ = self._batch_decode_responses(data, total_samples)
+        
+        # Pre-extract metadata
+        all_ground_truths = [data[i].non_tensor_batch["reward_model"]["ground_truth"] for i in range(total_samples)]
+        all_data_sources = [data[i].non_tensor_batch[self.reward_fn_key] for i in range(total_samples)]
+        all_vote_rewards = [data[i].batch["acc"] for i in range(total_samples)]
+        all_extra_infos = [data[i].non_tensor_batch["extra_info"] for i in range(total_samples)]
 
         post_ttrl_info = {}
         post_ttrl_metrics_list = defaultdict(list)
 
         for prompt_i in range(prompt_num):
-            group_vote_rewards = []
-            group_pred_outputs = []
-            group_labels = []
-            group_extra_info = []
-            task = None
+            start = prompt_i * self.n_samples_per_prompt
+            end = start + self.n_samples_per_prompt
+            
+            group_pred_outputs = all_response_strs[start:end]
+            group_labels = all_ground_truths[start:end]
+            group_vote_rewards = all_vote_rewards[start:end]
+            group_extra_info = all_extra_infos[start:end]
+            task = self._data_source_to_task(all_data_sources[start])
 
+            # Validate task consistency
             for i in range(self.n_samples_per_prompt):
-                data_item = data[prompt_i * self.n_samples_per_prompt + i]
-                prompt_idx = data_item.batch["prompts"]
-                prompt_length = prompt_idx.shape[-1]
-                valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-                valid_prompt_idx = prompt_idx[-valid_prompt_length:]
-                response_idx = data_item.batch["responses"]
-                valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-                valid_response_idx = response_idx[:valid_response_length]
-                prompt_str = self.tokenizer.decode(valid_prompt_idx, skip_special_tokens=False)
-                response_str = self.tokenizer.decode(valid_response_idx, skip_special_tokens=False)
-                ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-                data_source = data_item.non_tensor_batch[self.reward_fn_key]
-                vote_reward = data_item.batch["acc"]
-                extra_info = data_item.non_tensor_batch["extra_info"]
-
-                if task is None:
-                    task = self._data_source_to_task(data_source)
-                else:
-                    if task != self._data_source_to_task(data_source):
-                        raise NotImplementedError(
-                            f"Non consistent task {task} and {self._data_source_to_task(data_source)} "
-                            "for DiversityTTRLRewardManager"
-                        )
-
-                group_labels.append(ground_truth)
-                group_pred_outputs.append(response_str)
-                group_vote_rewards.append(vote_reward)
-                group_extra_info.append(extra_info)
+                cur_task = self._data_source_to_task(all_data_sources[start + i])
+                if cur_task != task:
+                    raise NotImplementedError(
+                        f"Non consistent task {task} and {cur_task} "
+                        "for DiversityTTRLRewardManager"
+                    )
 
             post_ttrl_metrics = post_test_time_train_metrics(
                 group_pred_outputs, group_labels, group_vote_rewards, task=task, extra_info=group_extra_info
@@ -306,90 +298,124 @@ class DiversityTTRLRewardManager:
         return post_ttrl_info
 
     # === Reward computation ===
+    def _batch_decode_responses(self, data: DataProto, total_samples: int):
+        """Batch decode all response strings at once, much faster than per-item decode.
+        
+        Returns:
+            Tuple of (response_strs, prompt_strs, valid_response_lengths)
+        """
+        # prepare the volumn
+        all_response_ids = []
+        all_prompt_ids = []
+        valid_response_lengths = []
+        
+        for i in range(total_samples):
+            # keep the valid part
+            data_item = data[i]
+            prompt_idx = data_item.batch["prompts"]
+            prompt_length = prompt_idx.shape[-1]
+            valid_prompt_length = int(data_item.batch["attention_mask"][:prompt_length].sum())
+            valid_prompt_idx = prompt_idx[-valid_prompt_length:]
+            
+            response_idx = data_item.batch["responses"]
+            valid_response_length = int(data_item.batch["attention_mask"][prompt_length:].sum())
+            valid_response_idx = response_idx[:valid_response_length]
+            
+            all_response_ids.append(valid_response_idx)
+            all_prompt_ids.append(valid_prompt_idx)
+            valid_response_lengths.append(valid_response_length)
+        
+        # Batch decode all at once
+        response_strs = self.tokenizer.batch_decode(all_response_ids, skip_special_tokens=False)
+        prompt_strs = self.tokenizer.batch_decode(all_prompt_ids, skip_special_tokens=False)
+        
+        return response_strs, prompt_strs, valid_response_lengths
+
     def _compute_ttrl_reward(self, data: DataProto):
+        """Compute TTRL rewards with diversity adjustment.
+        
+        Optimized version: uses batch_decode upfront and batches true_rewards verification.
+        """
         print("Starting TTRL reward calculation with diversity adjustment...")
 
         reward_extra_info = defaultdict(list)
         ttrl_info = {}
 
-        # Check if data is already down-sampled or if it's at original size
-        # Data should be divisible by n_votes_per_prompt for original size
-        # If not, it may already be down-sampled, so return default values
         if len(data) % self.n_votes_per_prompt != 0:
-            # Data has been down-sampled already; cannot compute diversity metrics
-            # Return zero rewards and default answer types/consistency rates
             print(f"WARNING: Data size {len(data)} is not divisible by n_votes_per_prompt {self.n_votes_per_prompt}")
             print(f"Data may already be down-sampled. Returning default values.")
             reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-            ttrl_info["_answer_types"] = np.arange(len(data), dtype=np.int64)  # Default IDs
-            ttrl_info["_consistency_rate"] = np.ones(len(data), dtype=np.float32) * 0.5  # Default consistency
+            ttrl_info["_answer_types"] = np.arange(len(data), dtype=np.int64)
+            ttrl_info["_consistency_rate"] = np.ones(len(data), dtype=np.float32) * 0.5
             return reward_tensor, reward_extra_info, ttrl_info
 
         prompt_num = len(data) // self.n_votes_per_prompt
+        total_samples = len(data)
         reward_tensor = torch.zeros_like(
             data.batch["responses"][: prompt_num * self.n_samples_per_prompt], dtype=torch.float32
         )
 
+        # ========== OPTIMIZATION: Batch decode all responses upfront ==========
+        all_response_strs, all_prompt_strs, all_valid_resp_lengths = self._batch_decode_responses(data, total_samples)
+        
+        # Pre-extract metadata
+        all_ground_truths = [data[i].non_tensor_batch["reward_model"]["ground_truth"] for i in range(total_samples)]
+        all_data_sources = [data[i].non_tensor_batch[self.reward_fn_key] for i in range(total_samples)]
+        all_extra_infos = [data[i].non_tensor_batch["extra_info"] for i in range(total_samples)]
+        
+        # Determine task (should be consistent)
+        task = self._data_source_to_task(all_data_sources[0])
+
+        # ========== OPTIMIZATION: Batch true_rewards verification for ALL samples ==========
+        # This replaces per-prompt-group auto_verify calls for diagnostic metrics
+        all_true_rewards_list, _ = auto_verify(
+            task, all_response_strs,
+            [all_ground_truths[i] for i in range(total_samples)],
+            extra_info=all_extra_infos
+        )
+
         already_print_data_sources = {}
         all_ttrl_metrics = defaultdict(list)
-        scores = [0.0 for _ in range(len(data))]
+        scores = [0.0] * total_samples
         
-        # === NEW: Collect answer_types, consistency_rate, and accuracy_rate for diversity density advantage ===
-        # answer_types: per-sample answer type id (hash of extracted answer)
-        # consistency_rate: per-sample self-consistency rate (majority_ratio from this prompt group)
-        # accuracy_rate: per-sample accuracy rate (correct_count / total from this prompt group)
         all_answer_types = []
-        all_oracle_answer_types = []  # Oracle (true-label based) answer types for advantage bias diagnostics
+        all_oracle_answer_types = []
         all_consistency_rates = []
         all_accuracy_rates = []
-        all_label_accuracies = []  # Binary indicator of majority vote correctness
+        all_label_accuracies = []
 
         for prompt_i in range(prompt_num):
-            group_pred_outputs = []
-            group_labels = []
-            group_extra_info = []
-            group_resp_lengths = []
-            group_prompts = []
-            group_indices = []
-            task = None
+            start = prompt_i * self.n_votes_per_prompt
+            end = start + self.n_votes_per_prompt
+            
+            group_pred_outputs = all_response_strs[start:end]
+            group_labels = all_ground_truths[start:end]
+            group_extra_info = all_extra_infos[start:end]
+            group_resp_lengths = all_valid_resp_lengths[start:end]
 
+            # Validate task consistency
             for i in range(self.n_votes_per_prompt):
-                data_item = data[prompt_i * self.n_votes_per_prompt + i]
-                prompt_str, response_str, valid_response_length = self._decode_data_item(data_item)
-                ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-                data_source = data_item.non_tensor_batch[self.reward_fn_key]
-                extra_info = data_item.non_tensor_batch["extra_info"]
-
-                if task is None:
-                    task = self._data_source_to_task(data_source)
-                else:
-                    if task != self._data_source_to_task(data_source):
-                        raise NotImplementedError(
-                            f"Non consistent task {task} and {self._data_source_to_task(data_source)} "
-                            "for DiversityTTRLRewardManager"
-                        )
-
-                group_labels.append(ground_truth)
-                group_pred_outputs.append(response_str)
-                group_extra_info.append(extra_info)
-                group_resp_lengths.append(int(valid_response_length))
-                group_prompts.append(prompt_str)
+                cur_task = self._data_source_to_task(all_data_sources[start + i])
+                if cur_task != task:
+                    raise NotImplementedError(
+                        f"Non consistent task {task} and {cur_task} "
+                        "for DiversityTTRLRewardManager"
+                    )
 
             base_rewards, ttrl_metrics = test_time_train_metrics(
                 group_pred_outputs, group_labels, task=task, extra_info=group_extra_info
             )
 
-            current_group_data = data[prompt_i * self.n_votes_per_prompt : (prompt_i + 1) * self.n_votes_per_prompt]
+            current_group_data = data[start:end]
             strategy_entropy = self._compute_strategy_entropy(current_group_data)
             ttrl_metrics["neg_log_likelihood"] = strategy_entropy
             if self.debug_mode and strategy_entropy > 0:
                 print(f"    Strategy entropy: H_ttrl={strategy_entropy:.3f} (normalized negative log-likelihood)")
 
             final_rewards, diversity_ratio = self._apply_diversity_adjustment(group_pred_outputs, base_rewards, task)
-            # expose diversity metric for this group
             ttrl_metrics["diversity_ratio"] = diversity_ratio
             
-            # === Extract answer types, consistency rate, and diagnostic metrics ===
+            # === Extract answer types and diagnostic metrics ===
             final_answers = self._extract_final_answers(task, group_pred_outputs)
             freq = Counter(final_answers)
             majority_num = max(freq.values()) if freq else 0
@@ -397,20 +423,14 @@ class DiversityTTRLRewardManager:
             accuracy_rate = ttrl_metrics.get("ground_truth_ratio", 0.0)
             label_accuracy = ttrl_metrics.get("label_accuracy", 0.0)
             
-            # === Compute true_rewards for diagnostic metrics ===
-            # base_rewards: matches majority (pseudo-label), true_rewards: matches ground truth
-            ground_truth = group_labels[0]
-            true_rewards, _ = auto_verify(
-                task, group_pred_outputs, [ground_truth] * len(group_pred_outputs),
-                extra_info=group_extra_info
-            )
+            # Use pre-computed batched true_rewards instead of per-group auto_verify
+            true_rewards = all_true_rewards_list[start:end]
             
-            # false_positive_rate: fraction of pseudo-positive samples that are actually wrong
+            # false_positive_rate / false_negative_rate
             n_pseudo_pos = sum(1 for b in base_rewards if b > 0)
             n_false_pos = sum(1 for b, t in zip(base_rewards, true_rewards) if b > 0 and t == 0)
             fp_rate = n_false_pos / n_pseudo_pos if n_pseudo_pos > 0 else 0.0
             
-            # false_negative_rate: fraction of pseudo-negative samples that are actually correct
             n_pseudo_neg = sum(1 for b in base_rewards if b == 0)
             n_false_neg = sum(1 for b, t in zip(base_rewards, true_rewards) if b == 0 and t > 0)
             fn_rate = n_false_neg / n_pseudo_neg if n_pseudo_neg > 0 else 0.0
@@ -418,11 +438,11 @@ class DiversityTTRLRewardManager:
             ttrl_metrics["false_positive_rate"] = fp_rate
             ttrl_metrics["false_negative_rate"] = fn_rate
             
-            # Create answer type mapping (hash of answer string -> integer id)
+            # Create answer type mapping
             answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
             
             for i in range(self.n_votes_per_prompt):
-                # --- TTA answer_types (based on pseudo-label / majority voting) ---
+                # TTA answer_types (based on pseudo-label / majority voting)
                 is_correct = base_rewards[i] > 0
                 if is_correct:
                     ans_type = 0
@@ -432,7 +452,7 @@ class DiversityTTRLRewardManager:
                         ans_type = 1
                 all_answer_types.append(ans_type)
                 
-                # --- Oracle answer_types (based on ground truth) ---
+                # Oracle answer_types (based on ground truth)
                 if true_rewards[i] > 0:
                     oracle_type = 0
                 else:
@@ -455,16 +475,15 @@ class DiversityTTRLRewardManager:
                 if i < self.n_samples_per_prompt and vlen > 0:
                     reward_tensor[prompt_i * self.n_samples_per_prompt + i, vlen - 1] = current_reward
 
-                scores[prompt_i * self.n_votes_per_prompt + i] = current_reward
+                scores[start + i] = current_reward
 
-                data_item = data[prompt_i * self.n_votes_per_prompt + i]
-                data_source = data_item.non_tensor_batch[self.reward_fn_key]
+                data_source = all_data_sources[start + i]
                 if data_source not in already_print_data_sources:
                     already_print_data_sources[data_source] = 0
                 if already_print_data_sources[data_source] < self.num_examine:
                     already_print_data_sources[data_source] += 1
                     print("\n    === Sample Debug Output ===")
-                    print("    [prompt]", group_prompts[i])
+                    print("    [prompt]", all_prompt_strs[start + i])
                     print("    [response]", group_pred_outputs[i])
                     print(f"    [final_score] {current_reward:.4f}")
                     print(f"    [base_reward] {base_rewards[i]:.4f}")
@@ -502,6 +521,10 @@ class DiversityTTRLRewardManager:
         return reward_tensor, reward_extra_info, ttrl_info
 
     def _compute_eval_reward(self, data: DataProto):
+        """Compute eval rewards with diversity adjustment.
+        
+        Optimized version: uses batch_decode upfront and eliminates duplicate decode loops.
+        """
         print("Starting evaluation reward calculation with diversity adjustment...")
 
         reward_extra_info = defaultdict(list)
@@ -514,43 +537,40 @@ class DiversityTTRLRewardManager:
         )
 
         prompt_num = len(data) // self.eval_n_samples
+        total_samples = len(data)
         print(f"  Processing {prompt_num} prompts, each with {self.eval_n_samples} samples")
 
-        group_pred_outputs = []
-        group_labels = []
-        group_extra_info = []
-        sample_valid_resp_len: dict[int, int] = {}
-        task_groups = {}
+        # ========== OPTIMIZATION: Batch decode all responses upfront ==========
+        all_response_strs, all_prompt_strs, all_valid_resp_lengths = self._batch_decode_responses(data, total_samples)
 
-        for i in range(len(data)):
-            data_item = data[i]
-            prompt_str, response_str, valid_response_length = self._decode_data_item(data_item)
-            sample_valid_resp_len[i] = int(valid_response_length)
+        # Pre-extract metadata
+        all_ground_truths = [data[i].non_tensor_batch["reward_model"]["ground_truth"] for i in range(total_samples)]
+        all_data_sources = [data[i].non_tensor_batch[self.reward_fn_key] for i in range(total_samples)]
+        all_extra_infos = [data[i].non_tensor_batch["extra_info"] for i in range(total_samples)]
 
-            ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-            data_source = data_item.non_tensor_batch[self.reward_fn_key]
-            extra_info = data_item.non_tensor_batch["extra_info"]
-
-            group_labels.append(ground_truth)
-            group_pred_outputs.append(response_str)
-            group_extra_info.append(extra_info)
-
+        # Debug print
+        for i in range(total_samples):
+            data_source = all_data_sources[i]
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print("[prompt]", prompt_str)
-                print("[response]", response_str)
+                print("[prompt]", all_prompt_strs[i])
+                print("[response]", all_response_strs[i])
 
-            task_key = self._data_source_to_task(data_source)
+        # Group by task for batched verification
+        task_groups = {}
+        for i in range(total_samples):
+            task_key = self._data_source_to_task(all_data_sources[i])
             if task_key not in task_groups:
                 task_groups[task_key] = {"indices": [], "outputs": [], "labels": [], "extra": []}
             task_groups[task_key]["indices"].append(i)
-            task_groups[task_key]["outputs"].append(response_str)
-            task_groups[task_key]["labels"].append(ground_truth)
-            task_groups[task_key]["extra"].append(extra_info)
+            task_groups[task_key]["outputs"].append(all_response_strs[i])
+            task_groups[task_key]["labels"].append(all_ground_truths[i])
+            task_groups[task_key]["extra"].append(all_extra_infos[i])
 
-        base_rewards = [0.0] * len(data)
+        # Single batched auto_verify per task group
+        base_rewards = [0.0] * total_samples
         for task_key, group in task_groups.items():
             rewards, verify_extra_info = auto_verify(task_key, group["outputs"], group["labels"], extra_info=group["extra"])
             for k, v in verify_extra_info.items():
@@ -559,64 +579,50 @@ class DiversityTTRLRewardManager:
             for idx_in_group, sample_idx in enumerate(group["indices"]):
                 base_rewards[sample_idx] = float(rewards[idx_in_group])
 
-        final_rewards = [0.0] * len(base_rewards)
-        # store per-prompt diversity ratios computed from outputs
+        # Apply diversity adjustment per prompt
+        final_rewards = [0.0] * total_samples
         prompt_diversity_ratios = [0.0] * prompt_num
         for prompt_i in range(prompt_num):
-            start_idx = prompt_i * self.eval_n_samples
-            end_idx = start_idx + self.eval_n_samples
-            prompt_outputs = group_pred_outputs[start_idx:end_idx]
-            prompt_base_rewards = base_rewards[start_idx:end_idx]
+            start = prompt_i * self.eval_n_samples
+            end = start + self.eval_n_samples
+            prompt_outputs = all_response_strs[start:end]
+            prompt_base_rewards = base_rewards[start:end]
 
-            first_idx = prompt_i * self.eval_n_samples
-            first_ds = data[first_idx].non_tensor_batch[self.reward_fn_key]
-            prompt_task = self._data_source_to_task(first_ds)
+            prompt_task = self._data_source_to_task(all_data_sources[start])
             prompt_final_rewards, diversity_ratio = self._apply_diversity_adjustment(
                 prompt_outputs, prompt_base_rewards, prompt_task
             )
             prompt_diversity_ratios[prompt_i] = diversity_ratio
-            for j, sample_idx in enumerate(range(start_idx, end_idx)):
-                final_rewards[sample_idx] = prompt_final_rewards[j]
+            for j in range(self.eval_n_samples):
+                final_rewards[start + j] = prompt_final_rewards[j]
 
-        for i in range(len(data)):
-            vlen = sample_valid_resp_len.get(i, 0)
+        # Assign rewards to tensor
+        for i in range(total_samples):
+            vlen = all_valid_resp_lengths[i]
             if vlen > 0:
                 reward_tensor[i, vlen - 1] = final_rewards[i]
 
+        # Compute TTRL evaluation metrics using pre-decoded strings (no second decode loop)
         print("\n=== Calculating TTRL Evaluation Metrics ===")
         all_ttrl_metrics = defaultdict(list)
 
         for prompt_i in range(prompt_num):
-            group_pred_outputs_ttrl = []
-            group_labels_ttrl = []
-            group_extra_info_ttrl = []
-
-            for i in range(self.eval_n_samples):
-                idx = prompt_i * self.eval_n_samples + i
-                data_item = data[idx]
-                _, response_str, _ = self._decode_data_item(data_item)
-                ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-                extra_info = data_item.non_tensor_batch["extra_info"]
-
-                group_pred_outputs_ttrl.append(response_str)
-                group_labels_ttrl.append(ground_truth)
-                group_extra_info_ttrl.append(extra_info)
-
-            first_ds = data[prompt_i * self.eval_n_samples].non_tensor_batch[self.reward_fn_key]
-            group_task = self._data_source_to_task(first_ds)
+            start = prompt_i * self.eval_n_samples
+            end = start + self.eval_n_samples
+            
+            group_pred_outputs = all_response_strs[start:end]
+            group_labels = all_ground_truths[start:end]
+            group_extra_info = all_extra_infos[start:end]
+            group_task = self._data_source_to_task(all_data_sources[start])
 
             _, ttrl_metrics = test_time_train_metrics(
-                group_pred_outputs_ttrl, group_labels_ttrl, task=group_task, extra_info=group_extra_info_ttrl
+                group_pred_outputs, group_labels, task=group_task, extra_info=group_extra_info
             )
 
-            current_group_data = data[prompt_i * self.eval_n_samples : (prompt_i + 1) * self.eval_n_samples]
+            current_group_data = data[start:end]
             strategy_entropy = self._compute_strategy_entropy(current_group_data)
             ttrl_metrics["neg_log_likelihood"] = strategy_entropy
-            # attach diversity metric computed earlier for this prompt
-            try:
-                ttrl_metrics["diversity_ratio"] = prompt_diversity_ratios[prompt_i]
-            except Exception:
-                ttrl_metrics["diversity_ratio"] = 0.0
+            ttrl_metrics["diversity_ratio"] = prompt_diversity_ratios[prompt_i]
 
             for k, v in ttrl_metrics.items():
                 all_ttrl_metrics[k].append(v)
