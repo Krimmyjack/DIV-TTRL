@@ -85,6 +85,7 @@ class AdvantageEstimator(str, Enum):
     DIVERSITY_DENSITY_HYBRID = "diversity_density_hybrid"
     PASS_GRPO = "pass_grpo"
     SELECTIVE_PASSK = "selective_passk"
+    ADAPTIVE_PASSK = "adaptive_passk"
 
 
 @dataclass
@@ -543,6 +544,94 @@ def compute_advantage(
         
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.ADAPTIVE_PASSK:
+        # ========== [2026-02-22 NEW] ==========
+        # Adaptive Pass@k: dynamically select k per prompt based on SC ratio
+        # SC < 0.3  → k=4 (noisy labels, moderate signal)
+        # 0.3 ≤ SC < 0.7 → k=2 (reliable labels, strong optimization)
+        # SC ≥ 0.7  → k=6 (high confidence, preserve diversity)
+        # =======================================
+        
+        if "answer_types" not in data.non_tensor_batch:
+            raise ValueError("ADAPTIVE_PASSK requires 'answer_types' in data.non_tensor_batch")
+        
+        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+        if consistency_rates is None:
+            raise ValueError("ADAPTIVE_PASSK requires 'consistency_rate' in data.non_tensor_batch")
+        
+        answer_types = data.non_tensor_batch["answer_types"]
+        uids = data.non_tensor_batch["uid"]
+        bs, response_length = data.batch["token_level_rewards"].shape
+        device = data.batch["token_level_rewards"].device
+        dtype = data.batch["token_level_rewards"].dtype
+        
+        # 1. Determine per-prompt k based on SC ratio
+        prompt_k = {}  # uid -> k
+        for i in range(bs):
+            uid = uids[i]
+            if uid not in prompt_k:
+                sc = consistency_rates[i]
+                if sc < 0.3:
+                    prompt_k[uid] = 4
+                elif sc < 0.7:
+                    prompt_k[uid] = 2
+                else:
+                    prompt_k[uid] = 6
+        
+        # 2. Group prompts by their assigned k value
+        k_to_indices = {}  # k -> list of sample indices
+        for i in range(bs):
+            uid = uids[i]
+            k_val = prompt_k[uid]
+            if k_val not in k_to_indices:
+                k_to_indices[k_val] = []
+            k_to_indices[k_val].append(i)
+        
+        # 3. Compute advantages per k-group
+        advantages = torch.zeros(bs, response_length, dtype=dtype, device=device)
+        returns = torch.zeros(bs, response_length, dtype=dtype, device=device)
+        
+        for k_val, indices in k_to_indices.items():
+            indices_tensor = torch.tensor(indices, dtype=torch.long)
+            
+            # Extract sub-batch for this k-group
+            sub_rewards = data.batch["token_level_rewards"][indices_tensor]
+            sub_mask = data.batch["response_mask"][indices_tensor]
+            sub_uids = np.array([uids[i] for i in indices])
+            sub_answer_types = np.array([answer_types[i] for i in indices])
+            
+            sub_adv, sub_ret = core_algos.compute_pass_grpo_advantage(
+                token_level_rewards=sub_rewards,
+                response_mask=sub_mask,
+                index=sub_uids,
+                answer_types=sub_answer_types,
+                k=k_val,
+            )
+            
+            # Scatter back into full-size tensors
+            advantages[indices_tensor] = sub_adv
+            returns[indices_tensor] = sub_ret
+        
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        
+        # 4. Diagnostic metrics
+        k_values = [prompt_k[uid] for uid in dict.fromkeys(uids)]  # unique prompts, preserving order
+        avg_k = sum(k_values) / len(k_values) if k_values else 0
+        k_counts = {}
+        for kv in k_values:
+            k_counts[kv] = k_counts.get(kv, 0) + 1
+        
+        data.meta_info["adaptive_passk/avg_k"] = avg_k
+        for kv, cnt in k_counts.items():
+            data.meta_info[f"adaptive_passk/num_prompts_k{kv}"] = cnt
+        data.meta_info["adaptive_passk/num_prompts_total"] = len(k_values)
+        
+        # Log advantage statistics
+        if advantages.abs().sum() > 0:
+            nonzero_mask = advantages.abs().sum(dim=-1) > 0
+            if nonzero_mask.any():
+                data.meta_info["adaptive_passk/avg_advantage"] = advantages[nonzero_mask].mean().item()
     else:
         raise NotImplementedError
     return data
@@ -613,6 +702,7 @@ class RayPPOTrainer:
             AdvantageEstimator.DIVERSITY_DENSITY_HYBRID,
             AdvantageEstimator.PASS_GRPO,
             AdvantageEstimator.SELECTIVE_PASSK,
+            AdvantageEstimator.ADAPTIVE_PASSK,
         ]:
             self.use_critic = False
         else:
@@ -1408,6 +1498,7 @@ class RayPPOTrainer:
                             AdvantageEstimator.DIVERSITY_DENSITY_HYBRID,
                             AdvantageEstimator.PASS_GRPO,
                             AdvantageEstimator.SELECTIVE_PASSK,
+                            AdvantageEstimator.ADAPTIVE_PASSK,
                         ]:
                             diversity_density_config = {
                                 "k": getattr(self.config.algorithm, "diversity_density_k", 8),
@@ -1514,6 +1605,18 @@ class RayPPOTrainer:
                         ]:
                             if sp_key in batch.meta_info:
                                 metrics[f"train/{sp_key.replace('/', '_')}"] = float(batch.meta_info[sp_key])
+
+                        # Log adaptive_passk metrics if available
+                        for ap_key in [
+                            "adaptive_passk/avg_k",
+                            "adaptive_passk/num_prompts_total",
+                            "adaptive_passk/num_prompts_k2",
+                            "adaptive_passk/num_prompts_k4",
+                            "adaptive_passk/num_prompts_k6",
+                            "adaptive_passk/avg_advantage",
+                        ]:
+                            if ap_key in batch.meta_info:
+                                metrics[f"train/{ap_key.replace('/', '_')}"] = float(batch.meta_info[ap_key])
 
                     # update critic
                     if self.use_critic:
