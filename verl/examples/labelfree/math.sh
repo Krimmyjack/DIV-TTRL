@@ -3,9 +3,9 @@
 bash examples/labelfree/math.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --backend fsdp \
-    --local_dir /root/autodl-tmp/DIV-TTRL/verl/checkpoints/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/TTRL-003309/global_step_30/actor \
-    --hf_model_path /root/autodl-tmp/model/Qwen3-4B-Base \
-    --target_dir /root/autodl-tmp/model/test_minority_low_threshold30
+    --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/220049/global_step_60/actor \
+    --hf_model_path /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
+    --target_dir /root/autodl-tmp/model/math_step_60_pass@2
 """
 export WANDB_ENTITY=2691454060-ucla
 # === TTRL Training Script ===
@@ -141,8 +141,9 @@ echo "========================="
 
 DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
+# TIME_TAG=182434
 
-ADVANTAGE="diversity_density_hybrid"
+ADVANTAGE="pass_grpo"
 
 echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"
@@ -164,7 +165,7 @@ else
 fi
 
 # Set EPISODE
-EPISODE=8
+EPISODE=6
 DATA_TRAIN_BATCH_SIZE=32
 N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
@@ -315,10 +316,10 @@ python -m verl.trainer.main_ppo \
   critic.model.fsdp_config.optimizer_offload=False \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
-  algorithm.diversity_density_fallback=pass_grpo \
-  algorithm.diversity_density_k=8 \
+  algorithm.diversity_density_fallback=grpo \
+  algorithm.diversity_density_k=2 \
   algorithm.diversity_density_use_metric=consistency_rate \
-  algorithm.consistency_threshold=0.7 \
+  algorithm.consistency_threshold=0.8 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
