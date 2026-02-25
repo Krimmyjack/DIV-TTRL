@@ -304,13 +304,11 @@ class DiversityTTRLRewardManager:
         Returns:
             Tuple of (response_strs, prompt_strs, valid_response_lengths)
         """
-        # prepare the volumn
         all_response_ids = []
         all_prompt_ids = []
         valid_response_lengths = []
         
         for i in range(total_samples):
-            # keep the valid part
             data_item = data[i]
             prompt_idx = data_item.batch["prompts"]
             prompt_length = prompt_idx.shape[-1]

@@ -533,22 +533,15 @@ class TrueLabelTTRLRewardManager:
 
         # Compute TTRL metrics for logging (using pre-decoded and pre-computed rewards)
         all_ttrl_metrics = defaultdict(list)
-        # Check once if old_log_probs is available (it won't be in eval mode with recompute_log_prob=False)
-        has_log_probs = "old_log_probs" in data.batch
-        if not has_log_probs:
-            print("[eval] old_log_probs not available, skipping strategy entropy computation")
         for prompt_i in range(prompt_num):
             start = prompt_i * self.eval_n_samples
             end = start + self.eval_n_samples
             
             true_rewards = all_rewards[start:end]
             
-            # Compute strategy entropy only if old_log_probs is available
-            if has_log_probs:
-                current_group_data = data[start:end]
-                strategy_entropy = self._compute_strategy_entropy(current_group_data)
-            else:
-                strategy_entropy = 0.0
+            # Compute strategy entropy for eval group
+            current_group_data = data[start:end]
+            strategy_entropy = self._compute_strategy_entropy(current_group_data)
 
             ttrl_metrics = {
                 "ground_truth_ratio": sum(true_rewards) / len(true_rewards),
