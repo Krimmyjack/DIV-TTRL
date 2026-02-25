@@ -157,18 +157,43 @@ def bootstrap_metric(
     data: list[Any],
     subset_size: int,
     reduce_fns: list[Callable[[np.ndarray], float]],
-    n_bootstrap: int = 1000,
+    n_bootstrap: int = 500,
     seed: int = 42,
 ) -> list[tuple[float, float]]:
-    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
+    n = len(data)
 
+    # Pre-generate all bootstrap indices at once: (n_bootstrap, subset_size)
+    all_idxs = rng.randint(0, n, size=(n_bootstrap, subset_size))
+
+    # Fast path: if data is numeric (not dicts), use fully vectorized numpy ops
+    if n > 0 and not isinstance(data[0], dict):
+        data_arr = np.asarray(data, dtype=np.float64)
+        # all_samples shape: (n_bootstrap, subset_size)
+        all_samples = data_arr[all_idxs]
+
+        results = []
+        for reduce_fn in reduce_fns:
+            if reduce_fn is np.max:
+                vals = all_samples.max(axis=1)
+            elif reduce_fn is np.min:
+                vals = all_samples.min(axis=1)
+            elif reduce_fn is np.mean:
+                vals = all_samples.mean(axis=1)
+            else:
+                # Fallback for custom reduce functions
+                vals = np.array([reduce_fn(row) for row in all_samples])
+            results.append((float(vals.mean()), float(vals.std())))
+        return results
+
+    # Slow path: dict data (e.g. majority voting) — still uses pre-generated indices
     bootstrap_metric_lsts = [[] for _ in range(len(reduce_fns))]
-    for _ in range(n_bootstrap):
-        bootstrap_idxs = np.random.choice(len(data), size=subset_size, replace=True)
-        bootstrap_data = [data[i] for i in bootstrap_idxs]
+    for idxs in all_idxs:
+        bootstrap_data = [data[i] for i in idxs]
         for i, reduce_fn in enumerate(reduce_fns):
             bootstrap_metric_lsts[i].append(reduce_fn(bootstrap_data))
     return [(np.mean(lst), np.std(lst)) for lst in bootstrap_metric_lsts]
+
 
 
 def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
