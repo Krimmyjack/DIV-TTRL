@@ -202,14 +202,14 @@ else
   WANDB_PROJECT="TTRL-MATH500"
 fi
 LOG_NAME="${EXPERIMENT}-${MODEL}"
-OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}-${TIME_TAG}"
+OUTPUT_DIR="checkpoints/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}-${TIMETAG}"
 
 # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
   reward_model.reward_manager=truelabel_ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
-  reward_model.reward_kwargs.mode="test_minority" \
+  reward_model.reward_kwargs.mode="train" \
   data.train_files=["$DATA_LOCAL_DIR/$TASK/train-simplerl.parquet"] \
   data.val_files=["$DATA_LOCAL_DIR/$TASK/test-simplerl.parquet"] \
   data.max_prompt_length=$MAX_PROMPT_LENGTH \
