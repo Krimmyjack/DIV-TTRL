@@ -33,6 +33,7 @@ Positive samples keep their base reward from ``test_time_train_metrics`` or
 
 from collections import Counter, defaultdict
 from functools import partial
+import random
 import numpy as np
 import torch
 from math import cos, pi
@@ -397,6 +398,30 @@ class DiversityTTRLRewardManager:
             consistency_rate = majority_num / self.n_votes_per_prompt if self.n_votes_per_prompt > 0 else 0.0
             accuracy_rate = ttrl_metrics.get("ground_truth_ratio", 0.0)
             label_accuracy = ttrl_metrics.get("label_accuracy", 0.0)
+
+            # === Bootstrap pseudo-label filtering for low-consistency prompts ===
+            bootstrap_applied = False
+            if consistency_rate < 0.3:
+                B_BOOT = 1000
+                BOOT_THRESHOLD = 0.02
+                boot_majorities = []
+                for _ in range(B_BOOT):
+                    subset = random.choices(final_answers, k=len(final_answers))
+                    boot_maj = Counter(subset).most_common(1)[0][0]
+                    boot_majorities.append(boot_maj)
+                boot_counter = Counter(boot_majorities)
+                pseudo_label_set = {ans for ans, cnt in boot_counter.items()
+                                    if cnt / B_BOOT >= BOOT_THRESHOLD}
+                # Reassign rewards: 1 if in bootstrap set, 0 otherwise
+                for i in range(self.n_votes_per_prompt):
+                    base_rewards[i] = 1.0 if final_answers[i] in pseudo_label_set else 0.0
+                # Recompute final_rewards with bootstrap-modified base_rewards
+                final_rewards, diversity_ratio = self._apply_diversity_adjustment(
+                    group_pred_outputs, base_rewards, task)
+                ttrl_metrics["diversity_ratio"] = diversity_ratio
+                bootstrap_applied = True
+                ttrl_metrics["bootstrap_set_size"] = len(pseudo_label_set)
+                ttrl_metrics["bootstrap_pos_ratio"] = sum(1 for a in final_answers if a in pseudo_label_set) / len(final_answers)
             
             # === Compute true_rewards for diagnostic metrics ===
             # base_rewards: matches majority (pseudo-label), true_rewards: matches ground truth
