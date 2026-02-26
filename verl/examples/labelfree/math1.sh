@@ -143,7 +143,7 @@ DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 # TIME_TAG=182434
 
-ADVANTAGE="adaptive_passk"
+ADVANTAGE="BOOTSTRAP_PASSK"
 
 echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"

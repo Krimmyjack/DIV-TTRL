@@ -797,6 +797,7 @@ class RayPPOTrainer:
             AdvantageEstimator.PASS_GRPO,
             AdvantageEstimator.SELECTIVE_PASSK,
             AdvantageEstimator.ADAPTIVE_PASSK,
+            AdvantageEstimator.BOOTSTRAP_PASSK,
         ]:
             self.use_critic = False
         else:
