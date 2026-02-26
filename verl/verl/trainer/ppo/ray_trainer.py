@@ -1713,6 +1713,17 @@ class RayPPOTrainer:
                             if ap_key in batch.meta_info:
                                 metrics[f"train/{ap_key.replace('/', '_')}"] = float(batch.meta_info[ap_key])
 
+                        # Log bootstrap_passk metrics if available
+                        for bp_key in [
+                            "bootstrap_passk/num_low_prompts",
+                            "bootstrap_passk/num_high_prompts",
+                            "bootstrap_passk/low_ratio",
+                            "bootstrap_passk/avg_low_advantage",
+                            "bootstrap_passk/avg_high_advantage",
+                            "bootstrap_passk/avg_total_advantage",
+                        ]:
+                            if bp_key in batch.meta_info:
+                                metrics[f"train/{bp_key.replace('/', '_')}"] = float(batch.meta_info[bp_key])
                     # update critic
                     if self.use_critic:
                         with _timer("update_critic", timing_raw):
