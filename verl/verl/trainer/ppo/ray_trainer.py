@@ -514,7 +514,7 @@ def compute_advantage(
             select_mask = torch.zeros(bs, 1, dtype=dtype, device=device)
             for i in range(bs):
                 uid = uids[i]
-                if prompt_consistency[uid] > threshold:
+                if prompt_consistency[uid] <= threshold:
                     select_mask[i] = 1.0
             
             # Zero out advantages for unselected prompts
@@ -523,7 +523,7 @@ def compute_advantage(
             
             # Diagnostic metrics
             num_prompts = len(prompt_consistency)
-            num_selected = sum(1 for cr in prompt_consistency.values() if cr > threshold)
+            num_selected = sum(1 for cr in prompt_consistency.values() if cr <= threshold)
             num_skipped = num_prompts - num_selected
             
             data.meta_info["selective_passk/num_prompts"] = num_prompts
@@ -533,8 +533,8 @@ def compute_advantage(
             data.meta_info["selective_passk/threshold"] = threshold
             
             # Log average consistency rate for selected vs skipped
-            selected_crs = [cr for cr in prompt_consistency.values() if cr > threshold]
-            skipped_crs = [cr for cr in prompt_consistency.values() if cr <= threshold]
+            selected_crs = [cr for cr in prompt_consistency.values() if cr >= threshold]
+            skipped_crs = [cr for cr in prompt_consistency.values() if cr < threshold]
             if selected_crs:
                 data.meta_info["selective_passk/avg_selected_consistency"] = sum(selected_crs) / len(selected_crs)
             if skipped_crs:
