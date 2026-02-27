@@ -434,8 +434,12 @@ class DiversityTTRLRewardManager:
                     boot_maj = Counter(subset).most_common(1)[0][0]
                     boot_majorities.append(boot_maj)
                 boot_counter = Counter(boot_majorities)
-                pseudo_label_set = {ans for ans, cnt in boot_counter.items()
-                                    if cnt / B_BOOT >= BOOT_THRESHOLD}
+                # Filter by threshold, then cap to top-3
+                candidates = sorted(
+                    [(ans, cnt / B_BOOT) for ans, cnt in boot_counter.items() if cnt / B_BOOT >= BOOT_THRESHOLD],
+                    key=lambda x: -x[1]
+                )
+                pseudo_label_set = {ans for ans, _ in candidates[:3]}
                 # Reassign rewards: 1 if in bootstrap set, 0 otherwise
                 for i in range(self.n_votes_per_prompt):
                     base_rewards[i] = 1.0 if final_answers[i] in pseudo_label_set else 0.0
