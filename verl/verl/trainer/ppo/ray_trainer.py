@@ -672,21 +672,17 @@ def compute_advantage(
         advantages = torch.zeros(bs, response_length, dtype=dtype, device=device)
         returns = torch.zeros(bs, response_length, dtype=dtype, device=device)
         
-        # 3a. Low consistency: Pass@k with bootstrap-modified rewards
+        # 3a. Low consistency: standard GRPO (rewards are continuous P_boot values)
         if low_indices:
             low_idx = torch.tensor(low_indices, dtype=torch.long)
             sub_rewards = data.batch["token_level_rewards"][low_idx]
             sub_mask = data.batch["response_mask"][low_idx]
             sub_uids = np.array([uids[i] for i in low_indices])
-            sub_answer_types = np.array([answer_types[i] for i in low_indices])
             
-            # Pass@k with k=4 (rewards already bootstrap-modified)
-            sub_adv, sub_ret = core_algos.compute_pass_grpo_advantage(
+            sub_adv, sub_ret = core_algos.compute_grpo_outcome_advantage(
                 token_level_rewards=sub_rewards,
                 response_mask=sub_mask,
                 index=sub_uids,
-                answer_types=sub_answer_types,
-                k=PASSK_K,
             )
             advantages[low_idx] = sub_adv
             returns[low_idx] = sub_ret
