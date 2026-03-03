@@ -95,6 +95,111 @@ def print_results(results, B):
     ]
 
     # ============================================================
+    # Section 0: Bootstrap Top-1 vs Raw Majority Comparison
+    # ============================================================
+    print(f"\n{'=' * 95}")
+    print("Bootstrap Top-1 vs Raw Majority")
+    print(f"{'=' * 95}")
+    print("  Bootstrap top-1 = most frequent answer among 1000 bootstrap iterations")
+    print("  Raw MAJ = most frequent answer in original 64 samples")
+
+    print(f"\n  {'Bucket':<16} {'N':<6} {'MAJ Acc':<10} {'Boot1 Acc':<10} "
+          f"{'Agree%':<9} {'Disagree':<10} {'MAJ wins':<10} {'Boot wins':<10}")
+    print("  " + "-" * 81)
+
+    for name, fn in buckets:
+        bucket = [r for r in results if fn(r)]
+        if not bucket:
+            continue
+        n = len(bucket)
+
+        maj_correct = 0
+        boot1_correct = 0
+        agree = 0
+        disagree = 0
+        maj_win = 0
+        boot_win = 0
+
+        for r in bucket:
+            boot_top1 = r["candidates"][0][0] if r["candidates"] else r["original_majority"]
+            maj = r["original_majority"]
+            gt = r["gt"]
+
+            if maj == gt:
+                maj_correct += 1
+            if boot_top1 == gt:
+                boot1_correct += 1
+
+            if boot_top1 == maj:
+                agree += 1
+            else:
+                disagree += 1
+                if boot_top1 == gt and maj != gt:
+                    boot_win += 1
+                elif maj == gt and boot_top1 != gt:
+                    maj_win += 1
+
+        maj_acc = maj_correct / n
+        boot1_acc = boot1_correct / n
+        agree_pct = agree / n
+
+        print(f"  {name:<16} {n:<6} {maj_acc:<10.1%} {boot1_acc:<10.1%} "
+              f"{agree_pct:<9.1%} {disagree:<10} {maj_win:<10} {boot_win:<10}")
+
+    # Detailed disagreement analysis for low consistency
+    low = [r for r in results if r["consistency"] <= 0.3]
+    if low:
+        print(f"\n  Low-Consistency Disagreement Detail:")
+
+        disagree_cases = []
+        for r in low:
+            boot_top1 = r["candidates"][0][0] if r["candidates"] else r["original_majority"]
+            maj = r["original_majority"]
+            if boot_top1 != maj:
+                gt = r["gt"]
+                # Margin: how close was the raw vote?
+                freq = r["freq"]
+                maj_count = freq[maj]
+                boot1_count = freq.get(boot_top1, 0)
+                margin = maj_count - boot1_count
+
+                disagree_cases.append({
+                    "maj": maj, "boot1": boot_top1, "gt": gt,
+                    "maj_correct": maj == gt, "boot1_correct": boot_top1 == gt,
+                    "margin": margin,
+                    "maj_count": maj_count, "boot1_count": boot1_count,
+                    "consistency": r["consistency"],
+                })
+
+        if disagree_cases:
+            n_dis = len(disagree_cases)
+            both_wrong = sum(1 for d in disagree_cases if not d["maj_correct"] and not d["boot1_correct"])
+            boot_win = sum(1 for d in disagree_cases if d["boot1_correct"] and not d["maj_correct"])
+            maj_win = sum(1 for d in disagree_cases if d["maj_correct"] and not d["boot1_correct"])
+            both_right = sum(1 for d in disagree_cases if d["maj_correct"] and d["boot1_correct"])
+            avg_margin = np.mean([d["margin"] for d in disagree_cases])
+
+            print(f"    Disagreement cases: {n_dis}/{len(low)} ({100*n_dis/len(low):.1f}%)")
+            print(f"    Boot wins (boot✓ maj✗): {boot_win} ({100*boot_win/n_dis:.1f}%)")
+            print(f"    MAJ wins  (maj✓ boot✗): {maj_win} ({100*maj_win/n_dis:.1f}%)")
+            print(f"    Both wrong:             {both_wrong} ({100*both_wrong/n_dis:.1f}%)")
+            print(f"    Both right:             {both_right}")
+            print(f"    Avg raw margin (maj_count - boot1_count): {avg_margin:.1f}")
+
+            # Margin distribution
+            margins = [d["margin"] for d in disagree_cases]
+            print(f"    Margin distribution: min={min(margins)}, median={np.median(margins):.0f}, max={max(margins)}")
+
+            # When margin is small (<=2), who wins more?
+            small_margin = [d for d in disagree_cases if d["margin"] <= 2]
+            if small_margin:
+                sm_boot = sum(1 for d in small_margin if d["boot1_correct"])
+                sm_maj = sum(1 for d in small_margin if d["maj_correct"])
+                print(f"    When margin<=2 ({len(small_margin)} cases): "
+                      f"Boot correct {sm_boot} ({100*sm_boot/len(small_margin):.0f}%), "
+                      f"MAJ correct {sm_maj} ({100*sm_maj/len(small_margin):.0f}%)")
+
+    # ============================================================
     # Section 1: Top-1 / Top-2 / Top-3 Comparison
     # ============================================================
     for K in [1, 2, 3]:
@@ -481,6 +586,105 @@ def print_results(results, B):
                   f"{sa:<12.3f} {cs:<10.3f} {ap:<+12.3f} {an:<+12.3f} "
                   f"{a_pos_v:<+10.3f} {a_neg_v:<+10.3f}")
         print("  " + "-" * 92)
+
+    # ============================================================
+    # Section 7: Parallel Universe Bootstrap Pass@k Advantage
+    # ============================================================
+    print(f"\n{'=' * 95}")
+    print("Parallel Universe Bootstrap Pass@k (k=4)")
+    print(f"{'=' * 95}")
+    print("  Adv_final = sum_c P_boot(c) * Adv_PassK(answer | GT=c)")
+
+    def compute_parallel_universe_advantage(answers, p_boot, k=4):
+        """
+        Compute advantage as weighted sum over 'parallel universes'.
+        For each candidate c with P_boot(c) > 0, compute Pass@k advantage
+        as if c is ground truth, then weight by P_boot(c).
+        """
+        N = len(answers)
+        final_adv = np.zeros(N)
+
+        for candidate, weight in p_boot.items():
+            if weight <= 0:
+                continue
+            # In this universe, candidate is the "ground truth"
+            types = [0 if a == candidate else 1 for a in answers]
+            universe_adv = compute_passk_advantage(types, k=k)
+            final_adv += weight * universe_adv
+
+        return final_adv
+
+    pu_method_names = ["MAJ", "PU-Boot", "Oracle"]
+
+    print(f"\n  {'Bucket':<16} {'Method':<10} {'Sign Align':<12} {'Cos Sim':<10} "
+          f"{'Avg A+(gt)':<12} {'Avg A-(gt)':<12}")
+    print("  " + "-" * 72)
+
+    for bname, bfn in buckets:
+        bucket = [r for r in results if bfn(r)]
+        if not bucket:
+            continue
+
+        method_stats = {m: {"sign_aligns": [], "cos_sims": [],
+                            "avg_pos": [], "avg_neg": []}
+                        for m in pu_method_names}
+
+        for r in bucket:
+            answers = r["answers"]
+            gt = r["gt"]
+            N = len(answers)
+
+            # Oracle Pass@k advantage
+            oracle_types = [0 if a == gt else 1 for a in answers]
+            oracle_adv = compute_passk_advantage(oracle_types, k=4)
+
+            if np.std(oracle_adv) < 1e-8:
+                continue
+
+            gt_pos_mask = np.array([a == gt for a in answers])
+            gt_neg_mask = ~gt_pos_mask
+
+            # MAJ Pass@k advantage (standard baseline)
+            maj_types = [0 if a == r["original_majority"] else 1 for a in answers]
+            maj_adv = compute_passk_advantage(maj_types, k=4)
+
+            # Parallel Universe Bootstrap advantage
+            pu_adv = compute_parallel_universe_advantage(answers, r["answer_conf"], k=4)
+
+            all_advs = {
+                "MAJ": maj_adv,
+                "PU-Boot": pu_adv,
+                "Oracle": oracle_adv,
+            }
+
+            for m in pu_method_names:
+                adv = all_advs[m]
+
+                if np.std(adv) < 1e-8:
+                    continue
+
+                if m == "Oracle":
+                    method_stats[m]["sign_aligns"].append(1.0)
+                    method_stats[m]["cos_sims"].append(1.0)
+                else:
+                    method_stats[m]["sign_aligns"].append(sign_alignment(adv, oracle_adv))
+                    method_stats[m]["cos_sims"].append(cosine_sim(adv, oracle_adv))
+
+                if gt_pos_mask.any():
+                    method_stats[m]["avg_pos"].append(adv[gt_pos_mask].mean())
+                if gt_neg_mask.any():
+                    method_stats[m]["avg_neg"].append(adv[gt_neg_mask].mean())
+
+        for m in pu_method_names:
+            s = method_stats[m]
+            sa = np.nanmean(s["sign_aligns"]) if s["sign_aligns"] else float('nan')
+            cs = np.nanmean(s["cos_sims"]) if s["cos_sims"] else float('nan')
+            ap = np.mean(s["avg_pos"]) if s["avg_pos"] else float('nan')
+            an = np.mean(s["avg_neg"]) if s["avg_neg"] else float('nan')
+
+            print(f"  {bname if m == pu_method_names[0] else '':<16} {m:<10} "
+                  f"{sa:<12.3f} {cs:<10.3f} {ap:<+12.3f} {an:<+12.3f}")
+        print("  " + "-" * 72)
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True)
