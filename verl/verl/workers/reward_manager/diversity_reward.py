@@ -31,6 +31,7 @@ Positive samples keep their base reward from ``test_time_train_metrics`` or
 ``auto_verify``.
 """
 
+import os
 from collections import Counter, defaultdict
 from functools import partial
 import random
@@ -39,6 +40,7 @@ import torch
 from math import cos, pi
 from verl import DataProto
 from verl.utils.reward_score.ttrl.auto_verify import auto_verify
+from verl.utils.reward_score.ttrl.auto_extract import auto_extract
 from verl.utils.reward_score.ttrl.ttt_metrics import (
     post_test_time_train_metrics, test_time_train_metrics)
 from verl.utils.reward_score.ttrl.latex_clean import normalize_latex
@@ -383,6 +385,41 @@ class DiversityTTRLRewardManager:
         all_accuracy_rates = []
         all_label_accuracies = []
 
+        # ========== API Self-Verification Pass ==========
+        use_self_verify = os.environ.get("USE_API_SELF_VERIFY", "0") == "1"
+        verified_labels = [None] * prompt_num
+        verify_results = [{}] * prompt_num
+        sc_threshold = float(os.environ.get("API_VERIFY_SC_THRESHOLD", "0.3"))
+        if use_self_verify:
+            from verl.utils.reward_score.ttrl.api_verify import auto_self_verify_batch
+            top_k = int(os.environ.get("API_VERIFY_TOP_K", "5"))
+            max_workers = int(os.environ.get("API_VERIFY_MAX_WORKERS", "8"))
+
+            # Prepare per-prompt data for batch verification
+            batch_tasks = []
+            batch_prompts = []
+            batch_solutions = []
+            batch_extra_infos = []
+            for prompt_i in range(prompt_num):
+                start = prompt_i * self.n_votes_per_prompt
+                end = start + self.n_votes_per_prompt
+                batch_tasks.append(task)
+                batch_prompts.append(all_prompt_strs[start])
+                batch_solutions.append(all_response_strs[start:end])
+                batch_extra_infos.append(all_extra_infos[start:end])
+
+            verify_results = auto_self_verify_batch(
+                tasks=batch_tasks,
+                problem_texts=batch_prompts,
+                solutions_batch=batch_solutions,
+                extra_infos=batch_extra_infos,
+                top_k=top_k,
+                sc_threshold=sc_threshold,
+                max_workers=max_workers
+            )
+            verified_labels = [res.get("ans") if res.get("ans") else None for res in verify_results]
+            n_verified = sum(1 for v in verified_labels if v is not None)
+            print(f"[API Verify] {n_verified}/{prompt_num} prompts verified via API")
 
         for prompt_i in range(prompt_num):
             start = prompt_i * self.n_votes_per_prompt
@@ -402,9 +439,27 @@ class DiversityTTRLRewardManager:
                         "for DiversityTTRLRewardManager"
                     )
 
+            verified_label = verified_labels[prompt_i]
             base_rewards, ttrl_metrics = test_time_train_metrics(
-                group_pred_outputs, group_labels, task=task, extra_info=group_extra_info
+                group_pred_outputs, group_labels, task=task, extra_info=group_extra_info,
+                verified_label=verified_label
             )
+
+            # Record self-verification metrics
+            if use_self_verify:
+                vr = verify_results[prompt_i] if prompt_i < len(verify_results) else {}
+                is_attempted = vr.get("consistency", 1.0) <= sc_threshold and len(set(auto_extract(task, group_pred_outputs, extra_info=group_extra_info))) >= 2
+                if is_attempted:
+                    is_correct = 1.0 if auto_verify(task, [verified_label or group_pred_outputs[0]], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
+                    ttrl_metrics["verify_attempted"] = 1.0
+                    ttrl_metrics["verify_correct_count"] = is_correct
+                    ttrl_metrics["verify_retries"] = vr.get("retries", 0)
+                    ttrl_metrics["verify_fallback_count"] = 1.0 if vr.get("is_fallback") else 0.0
+                else:
+                    ttrl_metrics["verify_attempted"] = 0.0
+                    ttrl_metrics["verify_correct_count"] = 0.0
+                    ttrl_metrics["verify_retries"] = 0.0
+                    ttrl_metrics["verify_fallback_count"] = 0.0
 
             current_group_data = data[start:end]
             strategy_entropy = self._compute_strategy_entropy(current_group_data)

@@ -208,12 +208,6 @@ class TTRLRewardManager:
             all_ttrl_metrics = defaultdict(list)
 
             scores = [0.0 for _ in range(len(data))]
-            
-            all_group_pred_outputs = []
-            all_group_labels = []
-            all_group_extra_info = []
-            all_tasks = []
-            all_prompts = []
 
             for prompt_i in range(prompt_num):
                 group_pred_outputs = []
@@ -247,60 +241,8 @@ class TTRLRewardManager:
                     group_labels.append(ground_truth)
                     group_pred_outputs.append(response_str)
                     group_extra_info.append(extra_info)
-                
-                all_group_pred_outputs.append(group_pred_outputs)
-                all_group_labels.append(group_labels)
-                all_group_extra_info.append(group_extra_info)
-                all_tasks.append(task)
-                all_prompts.append(prompt_str)
 
-            # === API Self Verification Pass ===
-            import os
-            verified_labels = [None] * prompt_num
-            use_self_verify = os.environ.get("USE_API_SELF_VERIFY", "0") == "1"
-            if use_self_verify:
-                from verl.utils.reward_score.ttrl.api_verify import auto_self_verify_batch
-                top_k = int(os.environ.get("API_VERIFY_TOP_K", "5"))
-                sc_threshold = float(os.environ.get("API_VERIFY_SC_THRESHOLD", "0.3"))
-                max_workers = int(os.environ.get("API_VERIFY_MAX_WORKERS", "8"))
-                
-                verify_results = auto_self_verify_batch(
-                    tasks=all_tasks,
-                    problem_texts=all_prompts,
-                    solutions_batch=all_group_pred_outputs,
-                    extra_infos=all_group_extra_info,
-                    top_k=top_k,
-                    sc_threshold=sc_threshold,
-                    max_workers=max_workers
-                )
-                verified_labels = [res["ans"] if res.get("ans") else None for res in verify_results]
-
-            # === Compute Metrics and Rewards Pass ===
-            for prompt_i in range(prompt_num):
-                group_pred_outputs = all_group_pred_outputs[prompt_i]
-                group_labels = all_group_labels[prompt_i]
-                group_extra_info = all_group_extra_info[prompt_i]
-                task = all_tasks[prompt_i]
-                verified_label = verified_labels[prompt_i]
-
-                rewards, ttrl_metrics = test_time_train_metrics(group_pred_outputs, group_labels, task=task, extra_info=group_extra_info, verified_label=verified_label)
-
-                if use_self_verify:
-                    # Record self-verification metrics properly
-                    verify_result = verify_results[prompt_i] if prompt_i < len(verify_results) else {}
-                    is_attempted = verify_result.get("consistency", 1.0) <= sc_threshold and len(set(auto_extract(task, group_pred_outputs, extra_info=group_extra_info))) >= 2
-                    
-                    if is_attempted:
-                        is_correct = 1.0 if auto_verify(task, [verified_label or group_pred_outputs[0]], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
-                        ttrl_metrics["verify_attempted"] = 1.0
-                        ttrl_metrics["verify_correct_count"] = is_correct
-                        ttrl_metrics["verify_retries"] = verify_result.get("retries", 0)
-                        ttrl_metrics["verify_fallback_count"] = 1.0 if verify_result.get("is_fallback") else 0.0
-                    else:
-                        ttrl_metrics["verify_attempted"] = 0.0
-                        ttrl_metrics["verify_correct_count"] = 0.0
-                        ttrl_metrics["verify_retries"] = 0.0
-                        ttrl_metrics["verify_fallback_count"] = 0.0
+                rewards, ttrl_metrics = test_time_train_metrics(group_pred_outputs, group_labels, task=task, extra_info=group_extra_info)
 
                 # === Compute FP/FN rates (pseudo-label vs ground truth) ===
                 ground_truth = group_labels[0]
