@@ -134,6 +134,12 @@ def build_verify_prompt(problem, candidates):
 def call_api(system_prompt, user_content, max_tokens=4096):
     """Call ModelScope API with thinking mode."""
     client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    
+    extra_body = {
+        "enable_thinking": True,
+        "thinking_budget": 12288
+    }
+
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -143,7 +149,7 @@ def call_api(system_prompt, user_content, max_tokens=4096):
         temperature=0.0,
         max_tokens=max_tokens,
         stream=True,
-        extra_body={"enable_thinking": True},
+        extra_body=extra_body,
     )
     thinking_text = ""
     answer_text = ""
