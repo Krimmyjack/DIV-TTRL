@@ -251,8 +251,9 @@ def main(args):
                 
                 extracted_answers.append(norm_ans)
             
-            # 3. 统计频率
-            counter = Counter(extracted_answers)
+            # 3. 统计频率 (排除 [NO_ANSWER])
+            valid_answers = [a for a in extracted_answers if a != "[NO_ANSWER]"]
+            counter = Counter(valid_answers)
             # 获取出现次数最多的 (answer, count)
             most_common = counter.most_common(1)
             
@@ -260,7 +261,7 @@ def main(args):
                 best_norm_answer, count = most_common[0]
     
                 sc_answer = best_norm_answer
-                sc_score = count / len(responses)
+                sc_score = count / len(valid_answers)
                 
             else:
                 sc_answer = None

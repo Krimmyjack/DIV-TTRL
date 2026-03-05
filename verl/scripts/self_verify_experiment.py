@@ -86,72 +86,107 @@ def extract_answer(text):
 # Verification Prompt (two versions: with/without freq)
 # =====================================================
 
-SYSTEM_PROMPT = """You are an expert mathematical verifier. Your task is to rigorously evaluate a few candidate answers to a math problem. You must think independently, solve the problem step-by-step from scratch, and then determine if any of the provided candidates are completely correct."""
+SYSTEM_PROMPT = """You are an expert mathematical reasoning judge. Your task is to rigorously evaluate candidate solutions to a math problem, assess the quality of their reasoning, and select the most reliable one."""
 
-USER_TEMPLATE_NO_FREQ = """[Problem]
+USER_TEMPLATE_WITH_ROLLOUT = """[Test Time Problem]
 {problem}
 
-[Candidate Answers]
-Several distinct conclusions were proposed derived from rough calculations. They are:
+[Model Sampled Candidate Solutions]
+Below are {num_candidates} candidate solutions sampled from the model at test time. Each includes a complete reasoning process and a final answer.
+Important Context: This is a low-consistency sample with an estimated pass@{num_candidates} = 0.6-0.7. The correct answer MAY OR MAY NOT be among these candidates. Do NOT force a selection if no candidate is reliable.
 {options}
 
-[Verification Task]
-Please act as an impartial judge and follow these strict steps:
+[Selection Task]
+Please act as a cautious and rigorous reasoning judge. Follow these steps to either select the most reliable candidate OR conclude that no reliable candidate exists:
 
-1. Independent Derivation: Do NOT trust any of the candidate answers. Solve the problem yourself step-by-step. Show your complete logical reasoning and calculations.
+1. **Preliminary Screening: Fatal Error Check**
+   First, quickly eliminate any candidate with OBVIOUS fatal errors:
+   - Directly misinterprets the problem statement
+   - Contains clear logical contradictions or circular reasoning
+   - Has irreversible computational errors in core steps
+   List the eliminated candidates and their fatal errors (e.g., "Candidate 5: Misread the problem, used 'area' instead of 'perimeter'"). If no candidates are eliminated, state "All candidates pass preliminary screening."
 
-2. Comparison: Compare your final derived result with the Candidate Answers.
+2. **Individual Reasoning Review & Rigor Scoring**
+   For the remaining candidates, carefully examine their reasoning and assign a Rigor Score (0-10, 10 = perfect rigor) based on:
+   - Logical consistency (no contradictions, no circular reasoning)
+   - Computational accuracy (no arithmetic/algebraic errors; minor typos that don't affect logic are allowed)
+   - Justification completeness (all non-trivial steps are explained; no unexplained "leaps of faith")
+   - Problem alignment (directly addresses the problem, no off-topic detours)
+   - Premise validity (all implicit/explicit assumptions are reasonable and consistent with the problem)
+   For each candidate, output:
+   - Candidate X: Rigor Score = [score], Reasoning Assessment = [brief summary of strengths/weaknesses; "Perfectly rigorous" if score=10]
 
-3. Final Verdict: Conclude your response by strictly enclosing the correct option in a \\boxed{{}} environment.
-   - If your result exactly matches Option 1, output \\boxed{{Option 1}}.
-   - If your result exactly matches Option 2, output \\boxed{{Option 2}}.{extra_options}
-   - If NONE of the candidate answers are correct, output \\boxed{{None}}."""
+3. **Independent Derivation & Self-Confidence Check**
+   Solve the problem yourself step-by-step, showing complete logical reasoning and calculations.
+   After solving, assign a Self-Confidence Score (0-10, 10 = 100% confident) to your own derivation, based on:
+   - Clarity of the problem statement (no ambiguity)
+   - Complexity of the reasoning (no highly error-prone steps)
+   - Consistency of your own logic (no second-guessing)
+   Output:
+   - My Independent Derivation: [your step-by-step solution]
+   - My Self-Confidence Score: [score]
 
-USER_TEMPLATE_WITH_FREQ = """[Problem]
+4. **Cross-Validation & Reliability Decision**
+   Compare your independent derivation with the remaining candidates (both reasoning logic and final answer). Then make one of the following decisions:
+   a) **Reliable Candidate Exists**: If at least one candidate has a Rigor Score >= 7 AND its reasoning/answer aligns with your independent derivation (or has a different but equally rigorous reasoning path to the same answer), select the candidate with the highest Rigor Score.
+   b) **No Reliable Candidate**: If NO candidate meets the above criteria (e.g., all Rigor Scores <7, or no candidate aligns with your high-confidence independent derivation), conclude that no reliable candidate exists in the pool.
+
+5. **Final Verdict**
+   - If you selected a reliable candidate, strictly enclose it in a \\boxed{{}} environment (e.g., \\boxed{{Candidate 3}}), followed by a 1-sentence justification.
+   - If you concluded no reliable candidate exists, output \\boxed{{No Reliable Candidate}}, followed by a 1-sentence explanation."""
+
+USER_TEMPLATE_NO_ROLLOUT = """[Test Time Problem]
 {problem}
 
-[Candidate Answers]
-Several distinct conclusions were proposed derived from rough calculations. They are:
+[Model Sampled Candidate Answers]
+Below are {num_candidates} candidate answers sampled from the model at test time. The correct answer is highly likely to be among these candidates, but majority voting may be unreliable. Please prioritize reasoning rigor over result frequency.
 {options}
 
-[Verification Task]
-Please act as an impartial judge and follow these strict steps:
+[Selection Task]
+Please act as a rigorous reasoning judge and follow these steps:
 
-1. Independent Derivation: Do NOT trust any of the candidate answers. The confidence scores above are merely statistical frequencies and may be misleading. Solve the problem yourself step-by-step. Show your complete logical reasoning and calculations.
+1. **Independent Derivation**: Solve the problem yourself step-by-step. Show your complete logical reasoning and calculations.
 
-2. Comparison: Compare your final derived result with the Candidate Answers.
+2. **Comparison**: Compare your final derived result with each Candidate Answer.
 
-3. Final Verdict: Conclude your response by strictly enclosing the correct option in a \\boxed{{}} environment.
-   - If your result exactly matches Option 1, output \\boxed{{Option 1}}.
-   - If your result exactly matches Option 2, output \\boxed{{Option 2}}.{extra_options}
-   - If NONE of the candidate answers are correct, output \\boxed{{None}}."""
+3. **Final Selection**: Choose the candidate that matches your independently derived result. If none match, select the one with the most plausible answer.
+
+Conclude your response by strictly enclosing the selected candidate in a \\boxed{{}} environment (e.g., \\boxed{{Candidate 3}}).
+If NONE of the candidates are correct, output \\boxed{{None}}."""
 
 
-def build_verify_prompt(problem, candidates, tokenizer, model_path, show_freq=False):
+def build_verify_prompt(problem, candidates, tokenizer, model_path,
+                        show_freq=False, rollout_map=None):
     """
     Build verification prompt.
     candidates: list of (answer, frequency) tuples.
-    show_freq: if True, show frequency in the options.
+    rollout_map: if provided, dict {answer: rollout_text} to include full solutions.
     Returns: (prompt_text, option_map)
     """
     options_lines = []
     option_map = {}
     for i, (ans, freq) in enumerate(candidates):
-        label = f"Option {i+1}"
-        if show_freq:
-            options_lines.append(f"{label}: {ans} (confidence: {freq:.1%})")
+        label = f"Candidate {i+1}"
+        if rollout_map and ans in rollout_map:
+            rollout = rollout_map[ans]
+            options_lines.append(
+                f"--- {label} ---\n"
+                f"{rollout}\n"
+                f"**Final Answer: {ans}**"
+            )
         else:
             options_lines.append(f"{label}: {ans}")
         option_map[label] = ans
-    options_text = "\n".join(options_lines)
 
-    extra_lines = ""
-    for i in range(2, len(candidates)):
-        extra_lines += f"\n   - If your result exactly matches Option {i+1}, output \\boxed{{Option {i+1}}}."
+    if rollout_map:
+        options_text = "\n\n".join(options_lines)
+        template = USER_TEMPLATE_WITH_ROLLOUT
+    else:
+        options_text = "\n".join(options_lines)
+        template = USER_TEMPLATE_NO_ROLLOUT
 
-    template = USER_TEMPLATE_WITH_FREQ if show_freq else USER_TEMPLATE_NO_FREQ
     content = template.format(
-        problem=problem, options=options_text, extra_options=extra_lines
+        problem=problem, options=options_text, num_candidates=len(candidates)
     )
 
     if tokenizer:
@@ -178,12 +213,30 @@ def parse_verify_response(response_text, option_map):
         return None
     raw_stripped = raw.strip()
 
-    if raw_stripped in option_map:
-        return option_map[raw_stripped]
-    if raw_stripped.lower() == "none":
+    # Clean LaTeX artifacts: \text{...}, backslash-space, \mathrm{...}
+    cleaned = raw_stripped
+    cleaned = re.sub(r'\\text\{([^}]*)\}', r'\1', cleaned)
+    cleaned = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', cleaned)
+    cleaned = cleaned.replace('\\ ', ' ').replace('\\,', ' ')
+    cleaned = cleaned.strip()
+
+    # "No Reliable Candidate" / "None" → fallback
+    if "no reliable" in cleaned.lower() or cleaned.lower() == "none":
         return None
 
-    norm = strip_string(raw_stripped)
+    # Match "Candidate X" exactly
+    if cleaned in option_map:
+        return option_map[cleaned]
+
+    # Try partial match "Candidate N"
+    m = re.match(r'[Cc]andidate\s*(\d+)', cleaned)
+    if m:
+        label = f"Candidate {m.group(1)}"
+        if label in option_map:
+            return option_map[label]
+
+    # Try direct answer match
+    norm = strip_string(cleaned)
     for _label, ans in option_map.items():
         if strip_string(ans) == norm:
             return ans
@@ -238,11 +291,12 @@ def get_frequency_candidates(answers, top_k=5):
 # =====================================================
 
 def run_experiment(data, llm, tokenizer, model_path, sampling_params,
-                   candidate_fn, show_freq, exp_name):
+                   candidate_fn, show_freq, exp_name, use_rollout=False):
     """
     Run one self-verification experiment.
     candidate_fn: function(answers) -> (candidates, consistency)
     show_freq: whether to show frequency in prompt
+    use_rollout: if True, include one full rollout per candidate in the prompt
     Returns: list of result dicts per problem
     """
     print(f"\n{'='*80}")
@@ -270,10 +324,32 @@ def run_experiment(data, llm, tokenizer, model_path, sampling_params,
 
         # Only verify low-consistency with >= 2 candidates
         if consistency <= 0.3 and len(candidates) >= 2:
+            # Build rollout map: pick one representative rollout per candidate answer
+            rollout_map = None
+            if use_rollout and "responses" in item:
+                rollout_map = {}
+                responses = item["responses"]
+                MAX_ROLLOUT_LEN = 1500
+                for ans, _ in candidates[:5]:
+                    # Collect all rollouts that produced this answer
+                    matching = []
+                    for j, ext_ans in enumerate(answers):
+                        if ext_ans == ans and j < len(responses):
+                            matching.append(responses[j].strip())
+                    if not matching:
+                        continue
+                    # Prefer rollouts <= MAX_ROLLOUT_LEN, pick shortest among those
+                    short = [r for r in matching if len(r) <= MAX_ROLLOUT_LEN]
+                    if short:
+                        rollout_map[ans] = max(short, key=len)  # longest under limit
+                    else:
+                        rollout_map[ans] = min(matching, key=len)  # shortest overall
+
             prompt, option_map = build_verify_prompt(
                 item["problem"], candidates[:5],
                 tokenizer=tokenizer, model_path=model_path,
-                show_freq=show_freq
+                show_freq=show_freq,
+                rollout_map=rollout_map
             )
             verify_indices.append(idx)
             verify_prompts.append(prompt)
@@ -288,6 +364,10 @@ def run_experiment(data, llm, tokenizer, model_path, sampling_params,
             idx = verify_indices[i]
             response = output.outputs[0].text
             verified = parse_verify_response(response, verify_option_maps[i])
+
+            # Store prompt and response
+            results[idx]["verify_prompt"] = verify_prompts[i]
+            results[idx]["verify_response"] = response
 
             # Also extract the raw boxed answer (even if not in candidate set)
             raw_boxed = extract_answer(response)
@@ -420,96 +500,94 @@ def main(args):
     )
 
     # ========================================
-    # Exp A: Bootstrap candidates + frequency
+    # Sweep over K: Freq Top-K + Rollout + MAJ Fallback
     # ========================================
-    results_boot_freq = run_experiment(
-        data, llm, tokenizer, args.model_path, sampling_params,
-        candidate_fn=lambda ans: get_bootstrap_candidates(ans, B=args.num_bootstrap),
-        show_freq=False,
-        exp_name="A: Bootstrap Candidates"
-    )
+    ks = [5]
+    all_results = {}
 
-    # ========================================
-    # Exp B: Raw frequency candidates
-    # ========================================
-    results_raw_freq = run_experiment(
-        data, llm, tokenizer, args.model_path, sampling_params,
-        candidate_fn=lambda ans: get_frequency_candidates(ans, top_k=5),
-        show_freq=False,
-        exp_name="B: Top-5 Frequency Candidates"
-    )
+    for k in ks:
+        results_k = run_experiment(
+            data, llm, tokenizer, args.model_path, sampling_params,
+            candidate_fn=lambda ans, _k=k: get_frequency_candidates(ans, top_k=_k),
+            show_freq=False,
+            exp_name=f"K={k}: Freq Top-{k}",
+            use_rollout=False
+        )
+        # Fallback = MAJ (freq top-1), which is already the default fallback_top1
+        all_results[k] = results_k
 
     # ========================================
-    # Exp C: Bootstrap candidates + MAJ fallback
+    # Comparison Table
     # ========================================
-    # Same as A but fallback uses raw majority instead of bootstrap top-1
-    from copy import deepcopy
-    results_hybrid = deepcopy(results_boot_freq)
-    for i, r in enumerate(results_hybrid):
-        if r["verify_source"] == "fallback_top1":
-            r["verified_answer"] = r["maj_answer"]
-            r["verify_source"] = "fallback_maj"
+    print(f"\n{'='*90}")
+    print("K-Sweep Results: Freq Top-K + Rollout + MAJ Fallback")
+    print(f"{'='*90}")
 
-    print(f"\n{'='*80}")
-    print("Experiment: C: Bootstrap + MAJ Fallback")
-    print(f"{'='*80}")
-    print("  (Bootstrap candidates for verification, majority for fallback)")
+    buckets = [
+        ("Low(<=0.3)", lambda r: r["consistency"] <= 0.3),
+        ("Mid(0.3-0.7)", lambda r: 0.3 < r["consistency"] <= 0.7),
+        ("High(>0.7)", lambda r: r["consistency"] > 0.7),
+        ("All", lambda r: True),
+    ]
 
-    # ========================================
-    # Exp D: Freq candidates + Bootstrap fallback
-    # ========================================
-    # Same as B but fallback uses bootstrap top-1 instead of freq top-1
-    results_d = deepcopy(results_raw_freq)
-    # Build bootstrap top-1 lookup
-    boot_top1 = {}
-    for i, r in enumerate(results_boot_freq):
-        if r["candidates"]:
-            boot_top1[i] = r["candidates"][0][0]
-        else:
-            boot_top1[i] = r["maj_answer"]
+    for bname, bfn in buckets:
+        print(f"\n  {bname}:")
+        print(f"    {'K':<6} {'N':<6} {'MAJ':<8} {'Verify':<8} {'Gain':<8} "
+              f"{'Model':<7} {'FB':<5} {'Net':<6} {'GT Cover':<10}")
+        print(f"    " + "-" * 66)
 
-    for i, r in enumerate(results_d):
-        if r["verify_source"] == "fallback_top1":
-            r["verified_answer"] = boot_top1[i]
-            r["verify_source"] = "fallback_boot1"
+        for k in ks:
+            bucket = [r for r in all_results[k] if bfn(r)]
+            if not bucket:
+                continue
+            n = len(bucket)
+            maj_c = sum(1 for r in bucket if r["maj_correct"])
+            ver_c = sum(1 for r in bucket if r["verified_answer"] == r["gt_norm"])
+            model_n = sum(1 for r in bucket if r["verify_source"] == "model")
+            fb_n = sum(1 for r in bucket if r["verify_source"] == "fallback_top1")
+            rescued = sum(1 for r in bucket
+                          if not r["maj_correct"] and r["verified_answer"] == r["gt_norm"])
+            harmed = sum(1 for r in bucket
+                         if r["maj_correct"] and r["verified_answer"] != r["gt_norm"])
 
-    print(f"\n{'='*80}")
-    print("Experiment: D: Freq Candidates + Bootstrap Fallback")
-    print(f"{'='*80}")
-    print("  (Top-5 freq candidates for verification, bootstrap top-1 for fallback)")
+            # GT coverage in candidate set
+            verified_items = [r for r in bucket if r["verify_source"] != "unchanged"]
+            if verified_items:
+                gt_cover = sum(1 for r in verified_items
+                               if r["gt_norm"] in {a for a, _ in r["candidates"]}) / len(verified_items)
+            else:
+                gt_cover = float('nan')
 
-    # ========================================
-    # Comparison
-    # ========================================
-    print(f"\n{'='*80}")
-    print("Results Comparison")
-    print(f"{'='*80}")
+            maj_acc = maj_c / n
+            ver_acc = ver_c / n
+            gain = ver_acc - maj_acc
 
-    print_analysis(results_boot_freq, "A: Bootstrap")
-    print_analysis(results_raw_freq, "B: Top-5 Freq")
-    print_analysis(results_hybrid, "C: Boot cand + MAJ FB")
-    print_analysis(results_d, "D: Freq cand + Boot FB")
+            print(f"    {k:<6} {n:<6} {maj_acc:<8.1%} {ver_acc:<8.1%} {gain:<+8.1%} "
+                  f"{model_n:<7} {fb_n:<5} {rescued-harmed:<+6d} {gt_cover:<10.1%}")
 
-    # Side-by-side low-consistency comparison
-    low_boot = [r for r in results_boot_freq if r["consistency"] <= 0.3]
-    low_raw = [r for r in results_raw_freq if r["consistency"] <= 0.3]
-    low_hybrid = [r for r in results_hybrid if r["consistency"] <= 0.3]
-    low_d = [r for r in results_d if r["consistency"] <= 0.3]
-    if low_boot and low_raw and low_hybrid and low_d:
-        n = len(low_boot)
-        boot_acc = sum(1 for r in low_boot if r["verified_answer"] == r["gt_norm"]) / n
-        raw_acc = sum(1 for r in low_raw if r["verified_answer"] == r["gt_norm"]) / n
-        hybrid_acc = sum(1 for r in low_hybrid if r["verified_answer"] == r["gt_norm"]) / n
-        d_acc = sum(1 for r in low_d if r["verified_answer"] == r["gt_norm"]) / n
-        maj_acc = sum(1 for r in low_boot if r["maj_correct"]) / n
+    # Low-consistency detail per K
+    print(f"\n{'='*90}")
+    print("Low-Consistency Model Pick Accuracy by K")
+    print(f"{'='*90}")
+    print(f"  {'K':<6} {'Model Pick Acc':<18} {'Fallback Acc':<15} {'GT in Cands':<15}")
+    print(f"  " + "-" * 54)
 
-        print(f"\n  === Low-Consistency Head-to-Head ===")
-        print(f"  MAJ baseline:              {maj_acc:.1%}")
-        print(f"  A (Boot cand + Boot FB):   {boot_acc:.1%}  ({boot_acc - maj_acc:+.1%})")
-        print(f"  B (Freq cand + Freq FB):   {raw_acc:.1%}  ({raw_acc - maj_acc:+.1%})")
-        print(f"  C (Boot cand + MAJ FB):    {hybrid_acc:.1%}  ({hybrid_acc - maj_acc:+.1%})")
-        print(f"  D (Freq cand + Boot FB):   {d_acc:.1%}  ({d_acc - maj_acc:+.1%})")
-        print(f"  Best vs MAJ:               {max(boot_acc, raw_acc, hybrid_acc, d_acc) - maj_acc:+.1%}")
+    for k in ks:
+        low = [r for r in all_results[k] if r["consistency"] <= 0.3
+               and r["verify_source"] != "unchanged"]
+        if not low:
+            continue
+        model_items = [r for r in low if r["verify_source"] == "model"]
+        fb_items = [r for r in low if r["verify_source"] == "fallback_top1"]
+        gt_in = sum(1 for r in low if r["gt_norm"] in {a for a, _ in r["candidates"]})
+
+        mc = sum(1 for r in model_items if r["verified_answer"] == r["gt_norm"]) if model_items else 0
+        fc = sum(1 for r in fb_items if r["verified_answer"] == r["gt_norm"]) if fb_items else 0
+
+        mc_str = f"{mc}/{len(model_items)} ({100*mc/len(model_items):.1f}%)" if model_items else "N/A"
+        fc_str = f"{fc}/{len(fb_items)} ({100*fc/len(fb_items):.1f}%)" if fb_items else "N/A"
+
+        print(f"  {k:<6} {mc_str:<18} {fc_str:<15} {gt_in}/{len(low)} ({100*gt_in/len(low):.1f}%)")
 
     # Save results
     if args.output_file:
@@ -519,23 +597,22 @@ def main(args):
                 record = {
                     "problem": item["problem"],
                     "answer": item["answer"],
-                    "consistency": results_boot_freq[i]["consistency"],
-                    "gt_norm": results_boot_freq[i]["gt_norm"],
                     "maj_answer": item.get("sc_answer"),
-                    "A_verified": results_boot_freq[i]["verified_answer"],
-                    "A_source": results_boot_freq[i]["verify_source"],
-                    "B_verified": results_raw_freq[i]["verified_answer"],
-                    "B_source": results_raw_freq[i]["verify_source"],
-                    "C_verified": results_hybrid[i]["verified_answer"],
-                    "C_source": results_hybrid[i]["verify_source"],
-                    "D_verified": results_d[i]["verified_answer"],
-                    "D_source": results_d[i]["verify_source"],
                 }
+                for k in ks:
+                    r = all_results[k][i]
+                    record[f"K{k}_consistency"] = r["consistency"]
+                    record[f"K{k}_candidates"] = [(a, round(f, 4)) for a, f in r["candidates"]]
+                    record[f"K{k}_verified"] = r["verified_answer"]
+                    record[f"K{k}_source"] = r["verify_source"]
+                    record[f"K{k}_raw_model_answer"] = r.get("raw_model_answer")
+                    record[f"K{k}_verify_prompt"] = r.get("verify_prompt", "")
+                    record[f"K{k}_verify_response"] = r.get("verify_response", "")
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Bootstrap vs Frequency Self-Verification")
+    parser = argparse.ArgumentParser(description="K-Sweep Self-Verification with Rollout")
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--output_file", type=str, default="self_verify_results.jsonl")
@@ -544,3 +621,4 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     main(args)
+

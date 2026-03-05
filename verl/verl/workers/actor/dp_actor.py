@@ -132,6 +132,7 @@ class DataParallelPPOActor(BasePPOActor):
                 # compute entropy
                 if calculate_entropy:
                     entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                    topk_rmpad = verl_F.topk_values_from_logits(logits_rmpad, k=5)  # ((total_nnz / sp) + pad, 5)
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -141,18 +142,26 @@ class DataParallelPPOActor(BasePPOActor):
                         entropy_rmpad = gather_outpus_and_unpad(
                             entropy_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
                         )
+                        topk_rmpad = gather_outpus_and_unpad(
+                            topk_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                        )
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
                     full_entropy = pad_input(
                         hidden_states=entropy_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
+                    )
+                    full_topk = pad_input(
+                        hidden_states=topk_rmpad, indices=indices, batch=batch_size, seqlen=seqlen
                     )
                 full_log_probs = pad_input(
                     hidden_states=log_probs.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
                 )
 
                 # only return response part:
+                topk = None
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    topk = full_topk[:, -response_length - 1 : -1, :]  # (bsz, response_length, 5)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
             else:  # not using rmpad and no ulysses sp
@@ -167,10 +176,12 @@ class DataParallelPPOActor(BasePPOActor):
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                 log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                topk = None
                 if calculate_entropy:
                     entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                    topk = verl_F.topk_values_from_logits(logits, k=5)  # (bsz, response_length, 5)
 
-            return entropy, log_probs
+            return entropy, log_probs, topk
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -374,13 +385,19 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
 
-                    data = {
+                    step_metrics = {
                         "actor/pg_loss": pg_loss.detach().item(),
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                         "actor/ppo_kl": ppo_kl.detach().item(),
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
-                    append_to_dict(metrics, data)
+                    if topk is not None:
+                        for k in range(1, 6):
+                            k_th_log_prob = topk[:, :, k - 1]
+                            avg_kth = (k_th_log_prob * response_mask).sum() / response_mask.sum().clamp(min=1)
+                            step_metrics[f"actor/top{k}_log_prob"] = avg_kth.detach().item()
+
+                    append_to_dict(metrics, step_metrics)
 
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}

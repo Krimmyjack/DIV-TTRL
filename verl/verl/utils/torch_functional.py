@@ -112,6 +112,19 @@ def entropy_from_logits(logits: torch.Tensor):
     return entropy
 
 
+def topk_values_from_logits(logits: torch.Tensor, k: int = 5):
+    """
+    Calculate the log probability of the top-k tokens from the logits.
+    Args:
+        logits: (..., vocab_size)
+    Returns:
+        topk_log_probs: (..., k) containing the log probabilities of the top k choices.
+    """
+    log_probs = F.log_softmax(logits, dim=-1)
+    topk_log_probs, _ = torch.topk(log_probs, k=k, dim=-1)
+    return topk_log_probs
+
+
 def masked_sum(values, mask, axis=None):
     """Compute mean of tensor with a masked values."""
     return (values * mask).sum(axis=axis)
