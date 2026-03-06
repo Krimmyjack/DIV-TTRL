@@ -1,15 +1,12 @@
-"""
-Self-Verification Test Script using ModelScope API (Qwen/Qwen3-4B).
-Tests the verification prompt on a few low-consistency samples.
-"""
-
 import os
 import httpx
 import json
 import re
 import time
+import concurrent.futures
 from collections import Counter
 from openai import OpenAI
+from tqdm import tqdm
 
 # =====================================================
 # Config
@@ -19,7 +16,7 @@ API_KEY = "EMPTY"
 BASE_URL = "https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1"
 MODEL = "qwen3-4b-base"
 INPUT_FILE = r"D:\学习\科研\DIV-TTRL-PR\verl\scripts\qwen64.jsonl"
-NUM_SAMPLES = 10   # Number of low-consistency samples to test
+NUM_SAMPLES = None   # Set to None to test all low-consistency samples
 
 # =====================================================
 # Math answer normalization (simplified)
@@ -233,44 +230,27 @@ def main():
             })
 
     print(f"Found {len(low_sc_samples)} low-consistency samples (sc <= 0.3)")
-    print(f"Testing on first {NUM_SAMPLES} samples\n")
+    
+    samples_to_test = low_sc_samples if NUM_SAMPLES is None else low_sc_samples[:NUM_SAMPLES]
+    print(f"Testing on {len(samples_to_test)} samples\n")
+    print(f"Starting concurrent API verification with ThreadPoolExecutor...")
 
-    # Test on a few samples
-    results = []
-    for sample_idx, sample in enumerate(low_sc_samples[:NUM_SAMPLES]):
+    def process_sample(sample):
+        sample_idx = sample["index"]
         item = sample["item"]
         candidates = sample["candidates"]
         gt = sample["gt_norm"]
         maj = sample["maj_answer"]
 
-        print(f"{'='*80}")
-        print(f"Sample {sample_idx + 1} / {NUM_SAMPLES} (idx={sample['index']})")
-        print(f"{'='*80}")
-        print(f"  Problem: {item['problem'][:150]}...")
-        print(f"  GT Answer: {gt}")
-        print(f"  MAJ Answer: {maj}  (correct: {maj == gt})")
-        print(f"  Consistency: {sample['consistency']:.3f}")
-        print(f"  Candidates:")
-        for ans, freq in candidates:
-            marker = " ← GT" if strip_string(ans) == gt else ""
-            print(f"    {ans} ({freq:.1%}){marker}")
-
         # Build prompt
         prompt_content, option_map = build_verify_prompt(item["problem"], candidates)
 
-        print(f"\n  [Calling API with thinking mode...]")
-        start_time = time.time()
         thinking_text, answer_text = call_api(client, SYSTEM_PROMPT, prompt_content)
-        elapsed = time.time() - start_time
 
         if answer_text is None:
-            print(f"  API call failed!")
-            continue
+            return None
 
-        print(f"  [API responded in {elapsed:.1f}s]")
-        print(f"  [Thinking: {len(thinking_text)} chars, Answer: {len(answer_text)} chars]")
-
-        # Parse from answer_text (where \boxed{} should be)
+        # Parse from answer_text
         verified = parse_verify_response(answer_text, option_map)
         verified_norm = strip_string(verified) if verified else None
 
@@ -280,38 +260,28 @@ def main():
             verified_norm = candidates[0][0]
             source = "fallback_top1"
 
-        print(f"\n  --- Result ---")
-        print(f"  Model selected: {verified_norm} (source: {source})")
-        print(f"  Correct: {verified_norm == gt}")
-        print(f"  MAJ was: {maj} (correct: {maj == gt})")
-
-        # Show raw boxed answer
-        raw = extract_answer(answer_text)
-        print(f"  Raw \\boxed{{}}: {raw}")
-
-        # Show thinking (truncated)
-        if thinking_text:
-            print(f"\n  --- Thinking (first 500 chars) ---")
-            print(f"  {thinking_text[:500]}")
-            if len(thinking_text) > 500:
-                print(f"  ... ({len(thinking_text) - 500} more chars)")
-
-        # Show answer (truncated)
-        print(f"\n  --- Answer (first 500 chars) ---")
-        print(f"  {answer_text[:500]}")
-        if len(answer_text) > 500:
-            print(f"  ... ({len(answer_text) - 500} more chars)")
-
-        results.append({
-            "index": sample["index"],
+        return {
+            "index": sample_idx,
             "gt": gt,
             "maj": maj,
             "maj_correct": maj == gt,
             "verified": verified_norm,
             "verified_correct": verified_norm == gt,
             "source": source,
-        })
-        print()
+        }
+
+    results = []
+    failed_count = 0
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        futures = {executor.submit(process_sample, sample): sample for sample in samples_to_test}
+        
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Verifying"):
+            res = future.result()
+            if res is not None:
+                results.append(res)
+            else:
+                failed_count += 1
 
     # Summary
     if results:
@@ -321,9 +291,16 @@ def main():
         n = len(results)
         maj_correct = sum(1 for r in results if r["maj_correct"])
         ver_correct = sum(1 for r in results if r["verified_correct"])
-        print(f"  Samples tested: {n}")
-        print(f"  MAJ correct:    {maj_correct}/{n}")
-        print(f"  Verify correct: {ver_correct}/{n}")
+        print(f"  Total samples selected (sc<=0.3): {len(samples_to_test)}")
+        print(f"  Successfully processed:           {n}")
+        print(f"  Failed API calls:                 {failed_count}")
+        print(f"--------------------------------------------------")
+        print(f"  BEFORE (Majority Vote) Accuracy:  {maj_correct}/{n} ({maj_correct/n:.2%})")
+        print(f"  AFTER  (API Verify)    Accuracy:  {ver_correct}/{n} ({ver_correct/n:.2%})")
+        
+        # Calculate net improvement
+        improvement = ver_correct - maj_correct
+        print(f"  Net Change:                       {improvement:+d} correct answers ({improvement/n:+.2%})")
 
 
 if __name__ == "__main__":

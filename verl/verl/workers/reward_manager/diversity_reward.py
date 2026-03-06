@@ -449,16 +449,27 @@ class DiversityTTRLRewardManager:
             if use_self_verify:
                 vr = verify_results[prompt_i] if prompt_i < len(verify_results) else {}
                 is_attempted = vr.get("consistency", 1.0) <= sc_threshold and len(set(auto_extract(task, group_pred_outputs, extra_info=group_extra_info))) >= 2
+                
                 if is_attempted:
-                    is_correct = 1.0 if auto_verify(task, [verified_label or group_pred_outputs[0]], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
-                    ttrl_metrics["verify_attempted"] = 1.0
-                    ttrl_metrics["verify_correct_count"] = is_correct
-                    ttrl_metrics["verify_retries"] = vr.get("retries", 0)
+                    # Metric 1: Track that verification was triggered
+                    ttrl_metrics["verify_triggered_count"] = 1.0
+                    
+                    # Metric 2: Accuracy before verification (using majority vote)
+                    majority_ans = Counter(auto_extract(task, group_pred_outputs, extra_info=group_extra_info)).most_common(1)[0][0]
+                    acc_before = 1.0 if auto_verify(task, [majority_ans], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
+                    ttrl_metrics["verify_before_acc"] = acc_before
+                    
+                    # Metric 3: Accuracy after verification (using API result, or fallback)
+                    final_ans = verified_label if verified_label is not None else majority_ans
+                    acc_after = 1.0 if auto_verify(task, [final_ans], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
+                    ttrl_metrics["verify_after_acc"] = acc_after
+                    
+                    # Metric 4: Track fallback (API failed to return valid answer)
                     ttrl_metrics["verify_fallback_count"] = 1.0 if vr.get("is_fallback") else 0.0
                 else:
-                    ttrl_metrics["verify_attempted"] = 0.0
-                    ttrl_metrics["verify_correct_count"] = 0.0
-                    ttrl_metrics["verify_retries"] = 0.0
+                    ttrl_metrics["verify_triggered_count"] = 0.0
+                    ttrl_metrics["verify_before_acc"] = 0.0
+                    ttrl_metrics["verify_after_acc"] = 0.0
                     ttrl_metrics["verify_fallback_count"] = 0.0
 
             current_group_data = data[start:end]
@@ -538,15 +549,22 @@ class DiversityTTRLRewardManager:
                     oracle_type = answer_to_id[final_answers[i]]
                     if oracle_type == 0:
                         oracle_type = 1
-                all_oracle_answer_types.append(oracle_type)
-                
-                all_consistency_rates.append(consistency_rate)
-                all_accuracy_rates.append(accuracy_rate)
-                all_label_accuracies.append(label_accuracy)
-
+                group_oracle_answer_types.append(oracle_type)
+            
+            scores.extend(final_rewards) # Extend scores with final_rewards for this group
+            all_answer_types.extend(group_answer_types)
+            all_oracle_answer_types.extend(group_oracle_answer_types)
+            all_consistency_rates.extend([consistency_rate] * self.n_votes_per_prompt)
+            all_accuracy_rates.extend([accuracy_rate] * self.n_votes_per_prompt)
+            all_label_accuracies.extend([label_accuracy] * self.n_votes_per_prompt)
+            
+            # Aggregate new dict-based metrics safely out of local ttrl_metrics 
             for k, v in ttrl_metrics.items():
-                all_ttrl_metrics[k].append(v)
-
+                if k not in ttrl_info:
+                    ttrl_info[k] = []
+                ttrl_info[k].append(v)
+            
+            # Assign rewards to tensor for this group
             for i in range(self.n_votes_per_prompt):
                 current_reward = final_rewards[i]
                 vlen = group_resp_lengths[i]
@@ -554,7 +572,7 @@ class DiversityTTRLRewardManager:
                 if i < self.n_samples_per_prompt and vlen > 0:
                     reward_tensor[prompt_i * self.n_samples_per_prompt + i, vlen - 1] = current_reward
 
-                scores[start + i] = current_reward
+                # scores[start + i] = current_reward # This is now handled by scores.extend(final_rewards)
 
                 data_source = all_data_sources[start + i]
                 if data_source not in already_print_data_sources:

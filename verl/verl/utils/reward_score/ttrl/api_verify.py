@@ -11,9 +11,9 @@ from verl.utils.reward_score.ttrl.auto_extract import auto_extract
 # =====================================================
 
 # You can override these via environment variables if needed
-API_KEY = os.environ.get("MODELSCOPE_API_KEY", "ms-06ae5daf-b4e6-4451-83ad-c6a272397f65")
-BASE_URL = os.environ.get("MODELSCOPE_BASE_URL", "https://api-inference.modelscope.cn/v1")
-MODEL = os.environ.get("MODELSCOPE_MODEL", "Qwen/Qwen3-4B")
+API_KEY = os.environ.get("AUTODL_API_KEY", "EMPTY")
+BASE_URL = os.environ.get("AUTODL_BASE_URL", "https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1")
+MODEL = os.environ.get("AUTODL_MODEL", "qwen3-4b-base")
 
 # =====================================================
 # Prompt Templates
@@ -24,8 +24,8 @@ SYSTEM_PROMPT = """You are an expert mathematical reasoning judge. Your task is 
 USER_TEMPLATE_NO_ROLLOUT = """[Test Time Problem]
 {problem}
 
-[Model Sampled Candidate Answers]
-Below are {num_candidates} candidate answers sampled from the model at test time. The correct answer is highly likely to be among these candidates, but majority voting may be unreliable. Please prioritize reasoning rigor over result frequency.
+[Candidate Answers]
+Below are {num_candidates} candidate answers. The correct answer is highly likely to be among these candidates.
 {options}
 
 [Selection Task]
@@ -128,43 +128,52 @@ def build_verify_prompt(problem, candidates):
     return content, option_map
 
 # =====================================================
-# API Call
-# =====================================================
 
 def call_api(system_prompt, user_content, max_tokens=4096):
-    """Call ModelScope API with thinking mode."""
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    """Call AutoDL VLLM Base Model API."""
+    import httpx
     
-    extra_body = {
-        "enable_thinking": True,
-        "thinking_budget": 12288
-    }
+    # Temporarily remove proxies
+    old_http = os.environ.pop("http_proxy", None)
+    old_https = os.environ.pop("https_proxy", None)
+    old_HTTP = os.environ.pop("HTTP_PROXY", None)
+    old_HTTPS = os.environ.pop("HTTPS_PROXY", None)
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.0,
-        max_tokens=max_tokens,
-        stream=True,
-        extra_body=extra_body,
-    )
-    thinking_text = ""
-    answer_text = ""
-    for chunk in response:
-        if chunk.choices:
-            delta = chunk.choices[0].delta
-            thinking_chunk = getattr(delta, 'reasoning_content', '') or ''
-            if thinking_chunk:
-                thinking_text += thinking_chunk
-            answer_chunk = delta.content or ''
-            if answer_chunk:
-                answer_text += answer_chunk
-    return thinking_text, answer_text
+    try:
+        custom_http_client = httpx.Client(verify=False)
+        client = OpenAI(
+            api_key=API_KEY, 
+            base_url=BASE_URL,
+            http_client=custom_http_client
+        )
+        
+        # Combine system prompt and user problem into a single base model prompt
+        prompt = f"{system_prompt}\n\n{user_content}\n\nReasoning:\n"
+        
+        response = client.completions.create(
+            model=MODEL,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        answer_text = response.choices[0].text
+        
+        # Restore proxies
+        if old_http: os.environ["http_proxy"] = old_http
+        if old_https: os.environ["https_proxy"] = old_https
+        if old_HTTP: os.environ["HTTP_PROXY"] = old_HTTP
+        if old_HTTPS: os.environ["HTTPS_PROXY"] = old_HTTPS
+        
+        return "", answer_text
+    except Exception as e:
+        # Restore proxies even on failure
+        if old_http: os.environ["http_proxy"] = old_http
+        if old_https: os.environ["https_proxy"] = old_https
+        if old_HTTP: os.environ["HTTP_PROXY"] = old_HTTP
+        if old_HTTPS: os.environ["HTTPS_PROXY"] = old_HTTPS
+        raise e
 
-def verify_single_problem(problem_text, candidate_answers, top_k=5, max_retries=3):
+def verify_single_problem(problem_text, candidate_answers, top_k=5, max_retries=6):
     candidates, _ = get_frequency_candidates(candidate_answers, top_k=top_k)
     # Filter valid candidates up to top_k, at least 2
     if len(candidates) < 2:
@@ -187,6 +196,8 @@ def verify_single_problem(problem_text, candidate_answers, top_k=5, max_retries=
                 verified = parse_verify_response(answer_text, option_map)
                 if verified is not None:
                     break
+                else:
+                    print(colorama.Fore.YELLOW + f"  [API Warning] 回答返回 None 或不在候选答案中，触发重试... ({retries+1}/{max_retries})")
         except openai.RateLimitError as e:
             print(colorama.Fore.RED + colorama.Style.BRIGHT + f"\n[CRITICAL WARNING] API 限额已满/超出请求速率！Rate Limit Exceeded: {e}\n")
             time.sleep(2)  # basic backoff
