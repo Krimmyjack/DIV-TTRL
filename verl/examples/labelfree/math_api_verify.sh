@@ -11,8 +11,8 @@ export WANDB_ENTITY=2691454060-ucla
 
 # API Self Verification configuration
 export USE_API_SELF_VERIFY=1
-export MODELSCOPE_API_KEY="ms-06ae5daf-b4e6-4451-83ad-c6a272397f65"
-export MODELSCOPE_MODEL="Qwen/Qwen3-4B:DashScope"
+export AUTODL_API_KEY="EMPTY"
+export AUTODL_MODEL="qwen3-4b-base"
 export API_VERIFY_TOP_K=5
 export API_VERIFY_SC_THRESHOLD=0.3
 export API_VERIFY_MAX_WORKERS=8
