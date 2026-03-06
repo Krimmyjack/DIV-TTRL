@@ -208,13 +208,13 @@ class TTRLRewardManager:
             all_ttrl_metrics = defaultdict(list)
 
             scores = [0.0 for _ in range(len(data))]
-            
+
             for prompt_i in range(prompt_num):
                 group_pred_outputs = []
                 group_labels = []
                 group_extra_info = []
-
                 task = None
+                prompt_str = ""
 
                 for i in range(self.n_votes_per_prompt):
                     data_item = data[prompt_i * self.n_votes_per_prompt + i]
@@ -241,6 +241,7 @@ class TTRLRewardManager:
                     group_labels.append(ground_truth)
                     group_pred_outputs.append(response_str)
                     group_extra_info.append(extra_info)
+
                 rewards, ttrl_metrics = test_time_train_metrics(group_pred_outputs, group_labels, task=task, extra_info=group_extra_info)
 
                 # === Compute FP/FN rates (pseudo-label vs ground truth) ===

@@ -8,7 +8,8 @@ from verl.utils.reward_score.ttrl.auto_verify import auto_verify
 def test_time_train_metrics(
     solutions: List[str],
     ground_truth: List[str],
-    task="math", extra_info=None):
+    task="math", extra_info=None,
+    verified_label=None):
     
     assert len(solutions) == len(ground_truth), f"{len(solutions)} vs {len(ground_truth)}"
 
@@ -20,8 +21,13 @@ def test_time_train_metrics(
     
     estimated_label, majority_count = counter.most_common(1)[0]
     
-    hit_rate = 1.0 if auto_verify(task, [estimated_label], [ground_truth], extra_info=extra_info)[0][0] else 0.0
     majority_ratio = majority_count / len(solutions)
+    
+    if verified_label is not None:
+        estimated_label = verified_label
+    
+    hit_rate = 1.0 if auto_verify(task, [estimated_label], [ground_truth], extra_info=extra_info)[0][0] else 0.0
+
     # true_label_ratio = counter.get(ground_truth, 0) / len(solutions)
 
     rewards, _ = auto_verify(task, solutions, [estimated_label] * len(solutions), extra_info=extra_info)

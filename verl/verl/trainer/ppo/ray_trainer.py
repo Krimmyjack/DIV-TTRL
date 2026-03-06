@@ -86,6 +86,7 @@ class AdvantageEstimator(str, Enum):
     PASS_GRPO = "pass_grpo"
     SELECTIVE_PASSK = "selective_passk"
     ADAPTIVE_PASSK = "adaptive_passk"
+    BOOTSTRAP_PASSK = "bootstrap_passk"
 
 
 @dataclass
@@ -632,6 +633,98 @@ def compute_advantage(
             nonzero_mask = advantages.abs().sum(dim=-1) > 0
             if nonzero_mask.any():
                 data.meta_info["adaptive_passk/avg_advantage"] = advantages[nonzero_mask].mean().item()
+    elif adv_estimator == AdvantageEstimator.BOOTSTRAP_PASSK:
+        # ========== [2026-02-26 NEW] ==========
+        # Bootstrap + Pass@k hybrid:
+        # - Low consistency (sc < 0.3): rewards have been modified by bootstrap
+        #   in diversity_reward.py to use set-membership binary reward.
+        #   Use standard GRPO advantage here.
+        # - Non-low consistency (sc >= 0.3): Use Pass@k (k=4) advantage.
+        # =======================================
+        
+        if "answer_types" not in data.non_tensor_batch:
+            raise ValueError("BOOTSTRAP_PASSK requires 'answer_types' in data.non_tensor_batch")
+        
+        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+        if consistency_rates is None:
+            raise ValueError("BOOTSTRAP_PASSK requires 'consistency_rate' in data.non_tensor_batch")
+        
+        answer_types = data.non_tensor_batch["answer_types"]
+        uids = data.non_tensor_batch["uid"]
+        bs, response_length = data.batch["token_level_rewards"].shape
+        device = data.batch["token_level_rewards"].device
+        dtype = data.batch["token_level_rewards"].dtype
+        
+        BOOTSTRAP_SC_THRESHOLD = 0.3
+        PASSK_K = 4
+        
+        # 1. Classify each prompt as low-consistency or not
+        prompt_is_low = {}  # uid -> bool
+        for i in range(bs):
+            uid = uids[i]
+            if uid not in prompt_is_low:
+                prompt_is_low[uid] = consistency_rates[i] < BOOTSTRAP_SC_THRESHOLD
+        
+        # 2. Split indices into two groups
+        low_indices = [i for i in range(bs) if prompt_is_low[uids[i]]]
+        high_indices = [i for i in range(bs) if not prompt_is_low[uids[i]]]
+        
+        advantages = torch.zeros(bs, response_length, dtype=dtype, device=device)
+        returns = torch.zeros(bs, response_length, dtype=dtype, device=device)
+        
+        # 3a. Low consistency: standard GRPO (rewards are continuous P_boot values)
+        if low_indices:
+            low_idx = torch.tensor(low_indices, dtype=torch.long)
+            sub_rewards = data.batch["token_level_rewards"][low_idx]
+            sub_mask = data.batch["response_mask"][low_idx]
+            sub_uids = np.array([uids[i] for i in low_indices])
+            
+            sub_adv, sub_ret = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=sub_rewards,
+                response_mask=sub_mask,
+                index=sub_uids,
+            )
+            advantages[low_idx] = sub_adv
+            returns[low_idx] = sub_ret
+        
+        # 3b. Non-low consistency: Pass@k (k=4)
+        if high_indices:
+            high_idx = torch.tensor(high_indices, dtype=torch.long)
+            sub_rewards = data.batch["token_level_rewards"][high_idx]
+            sub_mask = data.batch["response_mask"][high_idx]
+            sub_uids = np.array([uids[i] for i in high_indices])
+            sub_answer_types = np.array([answer_types[i] for i in high_indices])
+            
+            sub_adv, sub_ret = core_algos.compute_pass_grpo_advantage(
+                token_level_rewards=sub_rewards,
+                response_mask=sub_mask,
+                index=sub_uids,
+                answer_types=sub_answer_types,
+                k=PASSK_K,
+            )
+            advantages[high_idx] = sub_adv
+            returns[high_idx] = sub_ret
+        
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        
+        # 4. Diagnostic metrics
+        num_low = len(set(uid for uid, is_low in prompt_is_low.items() if is_low))
+        num_high = len(set(uid for uid, is_low in prompt_is_low.items() if not is_low))
+        num_total = num_low + num_high
+        
+        data.meta_info["bootstrap_passk/num_low_prompts"] = num_low
+        data.meta_info["bootstrap_passk/num_high_prompts"] = num_high
+        data.meta_info["bootstrap_passk/low_ratio"] = num_low / num_total if num_total > 0 else 0.0
+        
+        if low_indices:
+            low_idx_t = torch.tensor(low_indices, dtype=torch.long)
+            data.meta_info["bootstrap_passk/avg_low_advantage"] = advantages[low_idx_t].mean().item()
+        if high_indices:
+            high_idx_t = torch.tensor(high_indices, dtype=torch.long)
+            data.meta_info["bootstrap_passk/avg_high_advantage"] = advantages[high_idx_t].mean().item()
+        
+        data.meta_info["bootstrap_passk/avg_total_advantage"] = advantages.mean().item()
     else:
         raise NotImplementedError
     return data
@@ -703,6 +796,7 @@ class RayPPOTrainer:
             AdvantageEstimator.PASS_GRPO,
             AdvantageEstimator.SELECTIVE_PASSK,
             AdvantageEstimator.ADAPTIVE_PASSK,
+            AdvantageEstimator.BOOTSTRAP_PASSK,
         ]:
             self.use_critic = False
         else:
@@ -1618,6 +1712,17 @@ class RayPPOTrainer:
                             if ap_key in batch.meta_info:
                                 metrics[f"train/{ap_key.replace('/', '_')}"] = float(batch.meta_info[ap_key])
 
+                        # Log bootstrap_passk metrics if available
+                        for bp_key in [
+                            "bootstrap_passk/num_low_prompts",
+                            "bootstrap_passk/num_high_prompts",
+                            "bootstrap_passk/low_ratio",
+                            "bootstrap_passk/avg_low_advantage",
+                            "bootstrap_passk/avg_high_advantage",
+                            "bootstrap_passk/avg_total_advantage",
+                        ]:
+                            if bp_key in batch.meta_info:
+                                metrics[f"train/{bp_key.replace('/', '_')}"] = float(batch.meta_info[bp_key])
                     # update critic
                     if self.use_critic:
                         with _timer("update_critic", timing_raw):

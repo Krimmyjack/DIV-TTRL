@@ -31,13 +31,16 @@ Positive samples keep their base reward from ``test_time_train_metrics`` or
 ``auto_verify``.
 """
 
+import os
 from collections import Counter, defaultdict
 from functools import partial
+import random
 import numpy as np
 import torch
 from math import cos, pi
 from verl import DataProto
 from verl.utils.reward_score.ttrl.auto_verify import auto_verify
+from verl.utils.reward_score.ttrl.auto_extract import auto_extract
 from verl.utils.reward_score.ttrl.ttt_metrics import (
     post_test_time_train_metrics, test_time_train_metrics)
 from verl.utils.reward_score.ttrl.latex_clean import normalize_latex
@@ -382,6 +385,41 @@ class DiversityTTRLRewardManager:
         all_accuracy_rates = []
         all_label_accuracies = []
 
+        # ========== API Self-Verification Pass ==========
+        use_self_verify = os.environ.get("USE_API_SELF_VERIFY", "0") == "1"
+        verified_labels = [None] * prompt_num
+        verify_results = [{}] * prompt_num
+        sc_threshold = float(os.environ.get("API_VERIFY_SC_THRESHOLD", "0.3"))
+        if use_self_verify:
+            from verl.utils.reward_score.ttrl.api_verify import auto_self_verify_batch
+            top_k = int(os.environ.get("API_VERIFY_TOP_K", "5"))
+            max_workers = int(os.environ.get("API_VERIFY_MAX_WORKERS", "8"))
+
+            # Prepare per-prompt data for batch verification
+            batch_tasks = []
+            batch_prompts = []
+            batch_solutions = []
+            batch_extra_infos = []
+            for prompt_i in range(prompt_num):
+                start = prompt_i * self.n_votes_per_prompt
+                end = start + self.n_votes_per_prompt
+                batch_tasks.append(task)
+                batch_prompts.append(all_prompt_strs[start])
+                batch_solutions.append(all_response_strs[start:end])
+                batch_extra_infos.append(all_extra_infos[start:end])
+
+            verify_results = auto_self_verify_batch(
+                tasks=batch_tasks,
+                problem_texts=batch_prompts,
+                solutions_batch=batch_solutions,
+                extra_infos=batch_extra_infos,
+                top_k=top_k,
+                sc_threshold=sc_threshold,
+                max_workers=max_workers
+            )
+            verified_labels = [res.get("ans") if res.get("ans") else None for res in verify_results]
+            n_verified = sum(1 for v in verified_labels if v is not None)
+            print(f"[API Verify] {n_verified}/{prompt_num} prompts verified via API")
 
         for prompt_i in range(prompt_num):
             start = prompt_i * self.n_votes_per_prompt
@@ -401,9 +439,38 @@ class DiversityTTRLRewardManager:
                         "for DiversityTTRLRewardManager"
                     )
 
+            verified_label = verified_labels[prompt_i]
             base_rewards, ttrl_metrics = test_time_train_metrics(
-                group_pred_outputs, group_labels, task=task, extra_info=group_extra_info
+                group_pred_outputs, group_labels, task=task, extra_info=group_extra_info,
+                verified_label=verified_label
             )
+
+            # Record self-verification metrics
+            if use_self_verify:
+                vr = verify_results[prompt_i] if prompt_i < len(verify_results) else {}
+                is_attempted = vr.get("consistency", 1.0) <= sc_threshold and len(set(auto_extract(task, group_pred_outputs, extra_info=group_extra_info))) >= 2
+                
+                if is_attempted:
+                    # Metric 1: Track that verification was triggered
+                    ttrl_metrics["verify_triggered_count"] = 1.0
+                    
+                    # Metric 2: Accuracy before verification (using majority vote)
+                    majority_ans = Counter(auto_extract(task, group_pred_outputs, extra_info=group_extra_info)).most_common(1)[0][0]
+                    acc_before = 1.0 if auto_verify(task, [majority_ans], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
+                    ttrl_metrics["verify_before_acc"] = acc_before
+                    
+                    # Metric 3: Accuracy after verification (using API result, or fallback)
+                    final_ans = verified_label if verified_label is not None else majority_ans
+                    acc_after = 1.0 if auto_verify(task, [final_ans], [group_labels[0]], extra_info=group_extra_info)[0][0] else 0.0
+                    ttrl_metrics["verify_after_acc"] = acc_after
+                    
+                    # Metric 4: Track fallback (API failed to return valid answer)
+                    ttrl_metrics["verify_fallback_count"] = 1.0 if vr.get("is_fallback") else 0.0
+                else:
+                    ttrl_metrics["verify_triggered_count"] = 0.0
+                    ttrl_metrics["verify_before_acc"] = 0.0
+                    ttrl_metrics["verify_after_acc"] = 0.0
+                    ttrl_metrics["verify_fallback_count"] = 0.0
 
             current_group_data = data[start:end]
             strategy_entropy = self._compute_strategy_entropy(current_group_data)
@@ -421,6 +488,30 @@ class DiversityTTRLRewardManager:
             consistency_rate = majority_num / self.n_votes_per_prompt if self.n_votes_per_prompt > 0 else 0.0
             accuracy_rate = ttrl_metrics.get("ground_truth_ratio", 0.0)
             label_accuracy = ttrl_metrics.get("label_accuracy", 0.0)
+
+            # === Bootstrap frequency reward for low-consistency prompts ===
+            bootstrap_applied = False
+            if consistency_rate < 0.3:
+                B_BOOT = 1000
+                boot_majorities = []
+                for _ in range(B_BOOT):
+                    subset = random.choices(final_answers, k=len(final_answers))
+                    boot_maj = Counter(subset).most_common(1)[0][0]
+                    boot_majorities.append(boot_maj)
+                boot_counter = Counter(boot_majorities)
+                # P_boot(answer) = frequency of being bootstrap majority
+                p_boot = {ans: cnt / B_BOOT for ans, cnt in boot_counter.items()}
+                # Assign continuous reward = P_boot(answer)
+                for i in range(self.n_votes_per_prompt):
+                    base_rewards[i] = p_boot.get(final_answers[i], 0.0)
+                # Recompute final_rewards with bootstrap-modified base_rewards
+                final_rewards, diversity_ratio = self._apply_diversity_adjustment(
+                    group_pred_outputs, base_rewards, task)
+                ttrl_metrics["diversity_ratio"] = diversity_ratio
+                bootstrap_applied = True
+                n_distinct = len(p_boot)
+                ttrl_metrics["bootstrap_distinct_answers"] = n_distinct
+                ttrl_metrics["bootstrap_mean_reward"] = np.mean(base_rewards)
             
             # Use pre-computed batched true_rewards instead of per-group auto_verify
             true_rewards = all_true_rewards_list[start:end]
@@ -458,15 +549,22 @@ class DiversityTTRLRewardManager:
                     oracle_type = answer_to_id[final_answers[i]]
                     if oracle_type == 0:
                         oracle_type = 1
-                all_oracle_answer_types.append(oracle_type)
-                
-                all_consistency_rates.append(consistency_rate)
-                all_accuracy_rates.append(accuracy_rate)
-                all_label_accuracies.append(label_accuracy)
-
+                group_oracle_answer_types.append(oracle_type)
+            
+            scores.extend(final_rewards) # Extend scores with final_rewards for this group
+            all_answer_types.extend(group_answer_types)
+            all_oracle_answer_types.extend(group_oracle_answer_types)
+            all_consistency_rates.extend([consistency_rate] * self.n_votes_per_prompt)
+            all_accuracy_rates.extend([accuracy_rate] * self.n_votes_per_prompt)
+            all_label_accuracies.extend([label_accuracy] * self.n_votes_per_prompt)
+            
+            # Aggregate new dict-based metrics safely out of local ttrl_metrics 
             for k, v in ttrl_metrics.items():
-                all_ttrl_metrics[k].append(v)
-
+                if k not in ttrl_info:
+                    ttrl_info[k] = []
+                ttrl_info[k].append(v)
+            
+            # Assign rewards to tensor for this group
             for i in range(self.n_votes_per_prompt):
                 current_reward = final_rewards[i]
                 vlen = group_resp_lengths[i]
@@ -474,7 +572,7 @@ class DiversityTTRLRewardManager:
                 if i < self.n_samples_per_prompt and vlen > 0:
                     reward_tensor[prompt_i * self.n_samples_per_prompt + i, vlen - 1] = current_reward
 
-                scores[start + i] = current_reward
+                # scores[start + i] = current_reward # This is now handled by scores.extend(final_rewards)
 
                 data_source = all_data_sources[start + i]
                 if data_source not in already_print_data_sources:
