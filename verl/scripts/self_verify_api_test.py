@@ -3,6 +3,8 @@ Self-Verification Test Script using ModelScope API (Qwen/Qwen3-4B).
 Tests the verification prompt on a few low-consistency samples.
 """
 
+import os
+import httpx
 import json
 import re
 import time
@@ -13,9 +15,9 @@ from openai import OpenAI
 # Config
 # =====================================================
 
-API_KEY = "ms-06ae5daf-b4e6-4451-83ad-c6a272397f65"
-BASE_URL = "https://api-inference.modelscope.cn/v1"
-MODEL = "Qwen/Qwen3-4B"
+API_KEY = "EMPTY"
+BASE_URL = "https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1"
+MODEL = "qwen3-4b-base"
 INPUT_FILE = r"D:\学习\科研\DIV-TTRL-PR\verl\scripts\qwen64.jsonl"
 NUM_SAMPLES = 10   # Number of low-consistency samples to test
 
@@ -162,34 +164,23 @@ def parse_verify_response(response_text, option_map):
 # =====================================================
 
 def call_api(client, system_prompt, user_content, max_tokens=4096):
-    """Call ModelScope API with thinking mode and return (thinking_text, answer_text)."""
+    """Call AutoDL VLLM Base Model API."""
     try:
-        response = client.chat.completions.create(
+        # Combine system prompt and user problem into a single base model prompt
+        prompt = f"{system_prompt}\n\n{user_content}\n\nReasoning:\n"
+        
+        response = client.completions.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.0,
+            prompt=prompt,
             max_tokens=max_tokens,
-            stream=True,
-            extra_body={"enable_thinking": True},
+            temperature=0.0,
+            stop=["[Test Time Problem]", "Problem:"], 
         )
-        # Collect streaming response: thinking + answer
-        thinking_text = ""
-        answer_text = ""
-        for chunk in response:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                # Thinking content (reasoning process)
-                thinking_chunk = getattr(delta, 'reasoning_content', '') or ''
-                if thinking_chunk:
-                    thinking_text += thinking_chunk
-                # Answer content (final response)
-                answer_chunk = delta.content or ''
-                if answer_chunk:
-                    answer_text += answer_chunk
-        return thinking_text, answer_text
+        answer_text = response.choices[0].text
+        
+        # Base model usually doesn't separate thinking and answer blocks clearly in its API.
+        # We will treat the whole output as answer_text for our parser to parse \boxed{}.
+        return "", answer_text
     except Exception as e:
         print(f"  API Error: {e}")
         return None, None
@@ -211,7 +202,17 @@ def main():
 
     # Initialize API client
     print(f"Initializing API client: {MODEL}")
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    os.environ.pop("http_proxy", None)
+    os.environ.pop("https_proxy", None)
+    os.environ.pop("HTTP_PROXY", None)
+    os.environ.pop("HTTPS_PROXY", None)
+
+    custom_http_client = httpx.Client(verify=False)
+    client = OpenAI(
+        api_key=API_KEY, 
+        base_url=BASE_URL,
+        http_client=custom_http_client
+    )
 
     # Find low-consistency samples
     low_sc_samples = []
