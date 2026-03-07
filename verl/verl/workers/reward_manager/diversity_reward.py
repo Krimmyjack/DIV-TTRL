@@ -531,6 +531,9 @@ class DiversityTTRLRewardManager:
             # Create answer type mapping
             answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
             
+            group_answer_types = []
+            group_oracle_answer_types = []
+            
             for i in range(self.n_votes_per_prompt):
                 # TTA answer_types (based on pseudo-label / majority voting)
                 is_correct = base_rewards[i] > 0
