@@ -377,7 +377,7 @@ class DiversityTTRLRewardManager:
 
         already_print_data_sources = {}
         all_ttrl_metrics = defaultdict(list)
-        scores = [0.0] * total_samples
+        scores = []
         
         all_answer_types = []
         all_oracle_answer_types = []
@@ -394,6 +394,7 @@ class DiversityTTRLRewardManager:
             from verl.utils.reward_score.ttrl.api_verify import auto_self_verify_batch
             top_k = int(os.environ.get("API_VERIFY_TOP_K", "5"))
             max_workers = int(os.environ.get("API_VERIFY_MAX_WORKERS", "8"))
+            skip_fallback = os.environ.get("API_VERIFY_SKIP_FALLBACK", "1") == "1"
 
             # Prepare per-prompt data for batch verification
             batch_tasks = []
@@ -420,6 +421,8 @@ class DiversityTTRLRewardManager:
             verified_labels = [res.get("ans") if res.get("ans") else None for res in verify_results]
             n_verified = sum(1 for v in verified_labels if v is not None)
             print(f"[API Verify] {n_verified}/{prompt_num} prompts verified via API")
+
+        all_zero_advantage_masks = []
 
         for prompt_i in range(prompt_num):
             start = prompt_i * self.n_votes_per_prompt
@@ -471,6 +474,13 @@ class DiversityTTRLRewardManager:
                     ttrl_metrics["verify_before_acc"] = 0.0
                     ttrl_metrics["verify_after_acc"] = 0.0
                     ttrl_metrics["verify_fallback_count"] = 0.0
+                
+                if vr.get("is_fallback") and skip_fallback:
+                    all_zero_advantage_masks.extend([1.0] * self.n_votes_per_prompt)
+                else:
+                    all_zero_advantage_masks.extend([0.0] * self.n_votes_per_prompt)
+            else:
+                all_zero_advantage_masks.extend([0.0] * self.n_votes_per_prompt)
 
             current_group_data = data[start:end]
             strategy_entropy = self._compute_strategy_entropy(current_group_data)
@@ -563,9 +573,7 @@ class DiversityTTRLRewardManager:
             
             # Aggregate new dict-based metrics safely out of local ttrl_metrics 
             for k, v in ttrl_metrics.items():
-                if k not in ttrl_info:
-                    ttrl_info[k] = []
-                ttrl_info[k].append(v)
+                all_ttrl_metrics[k].append(v)
             
             # Assign rewards to tensor for this group
             for i in range(self.n_votes_per_prompt):
@@ -596,6 +604,7 @@ class DiversityTTRLRewardManager:
         training_consistency_rates = []
         training_accuracy_rates = []
         training_label_accuracies = []
+        training_zero_masks = []
         for prompt_i in range(prompt_num):
             for i in range(self.n_samples_per_prompt):
                 global_idx = prompt_i * self.n_votes_per_prompt + i
@@ -604,12 +613,14 @@ class DiversityTTRLRewardManager:
                 training_consistency_rates.append(all_consistency_rates[global_idx])
                 training_accuracy_rates.append(all_accuracy_rates[global_idx])
                 training_label_accuracies.append(all_label_accuracies[global_idx])
+                training_zero_masks.append(all_zero_advantage_masks[global_idx])
         
         ttrl_info["_answer_types"] = np.array(training_answer_types)
         ttrl_info["_oracle_answer_types"] = np.array(training_oracle_answer_types)
         ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
         ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
         ttrl_info["_label_accuracy"] = np.array(training_label_accuracies)
+        ttrl_info["_zero_advantage_mask"] = np.array(training_zero_masks)
 
 
         print("\n=== TTRL Training Metrics Summary ===")
