@@ -86,8 +86,8 @@ class AdvantageEstimator(str, Enum):
     PASS_GRPO = "pass_grpo"
     SELECTIVE_PASSK = "selective_passk"
     ADAPTIVE_PASSK = "adaptive_passk"
+    DELTA_PASSK = "delta_passk"
     BOOTSTRAP_PASSK = "bootstrap_passk"
-
 
 @dataclass
 class ResourcePoolManager:
@@ -627,12 +627,22 @@ def compute_advantage(
         for kv, cnt in k_counts.items():
             data.meta_info[f"adaptive_passk/num_prompts_k{kv}"] = cnt
         data.meta_info["adaptive_passk/num_prompts_total"] = len(k_values)
-        
         # Log advantage statistics
         if advantages.abs().sum() > 0:
             nonzero_mask = advantages.abs().sum(dim=-1) > 0
             if nonzero_mask.any():
                 data.meta_info["adaptive_passk/avg_advantage"] = advantages[nonzero_mask].mean().item()
+    elif adv_estimator == AdvantageEstimator.DELTA_PASSK:
+        # Delta Pass@k: rewards are already computed by DeltaPasskRewardManager
+        # and placed into token_level_rewards. We just need group-wise Z-score
+        # normalization, which is exactly what GRPO does.
+        advantages, returns = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.BOOTSTRAP_PASSK:
         # ========== [2026-02-26 NEW] ==========
         # Bootstrap + Pass@k hybrid:
@@ -796,13 +806,14 @@ class RayPPOTrainer:
             AdvantageEstimator.PASS_GRPO,
             AdvantageEstimator.SELECTIVE_PASSK,
             AdvantageEstimator.ADAPTIVE_PASSK,
+            AdvantageEstimator.DELTA_PASSK,
             AdvantageEstimator.BOOTSTRAP_PASSK,
         ]:
             self.use_critic = False
         else:
             raise NotImplementedError
         
-        if self.config.reward_model.reward_manager in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl"]:
+        if self.config.reward_model.reward_manager in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl", "delta_passk_ttrl"]:
             self.use_ttrl = True
             self.n_samples_per_prompt = self.config.reward_model.reward_kwargs.n_samples_per_prompt
             self.n_votes_per_prompt = self.config.reward_model.reward_kwargs.n_votes_per_prompt
