@@ -37,11 +37,14 @@ import torch
 
 from verl import DataProto
 from verl.trainer.ppo.core_algos import compute_expected_marginal_passk_rewards
-from verl.utils.reward_score.ttrl.auto_extract import auto_extract
+from verl.utils.reward_score.ttrl.auto_extract import _extract_serial
 from verl.utils.reward_score.ttrl.auto_verify import auto_verify
 from verl.utils.reward_score.ttrl.ttt_metrics import (
     post_test_time_train_metrics,
 )
+
+# Sentinel for answers that could not be extracted from model output
+INVALID_ANSWER_SENTINEL = "__INVALID_NO_ANSWER__"
 
 
 class DeltaPasskRewardManager:
@@ -67,6 +70,7 @@ class DeltaPasskRewardManager:
         k=4,
         mode="train",
         eval_n_samples=1,
+        invalid_penalty=0.0,
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -77,11 +81,13 @@ class DeltaPasskRewardManager:
         self.k = k
         self.mode = mode
         self.eval_n_samples = eval_n_samples
+        self.invalid_penalty = invalid_penalty  # reward for invalid-format responses
 
         print(
             f"DeltaPasskRewardManager initialized: "
             f"n_samples_per_prompt={n_samples_per_prompt}, "
-            f"k={k}, mode={mode}, eval_n_samples={eval_n_samples}"
+            f"k={k}, mode={mode}, eval_n_samples={eval_n_samples}, "
+            f"invalid_penalty={invalid_penalty}"
         )
 
     def _data_source_to_task(self, data_source):
@@ -106,20 +112,37 @@ class DeltaPasskRewardManager:
             f"Data source {data_source} is not supported for DeltaPasskRewardManager"
         )
 
+    def _extract_answers_preserve_none(self, task, responses):
+        """
+        Extract answers from responses, preserving None for failed extractions.
+        
+        Unlike auto_extract() which filters out None, this returns a list of
+        length == len(responses), with None for samples where extraction failed.
+        
+        Returns:
+            List[Optional[str]]: extracted answer or None per sample
+        """
+        raw_answers = _extract_serial(task, responses)
+        return raw_answers  # preserves None entries
+
     def _cluster_responses(self, extracted_answers, task, extra_info=None):
         """
         Cluster extracted answers by equivalence and return cluster sizes.
         
-        Uses O(N²) pairwise comparison via auto_verify to handle mathematical
-        equivalences (e.g., "1/2" == "0.5").
+        IMPORTANT: This method only receives VALID answers (None/invalid already
+        filtered out by the caller). The complexity is O(U²) where U is the
+        number of unique answer strings, NOT O(N²).
+        
+        For math tasks, uses auto_verify for mathematical equivalence checking
+        (e.g., "1/2" == "0.5"). For other tasks, uses exact string matching.
         
         Args:
-            extracted_answers: List of extracted answer strings
+            extracted_answers: List of VALID extracted answer strings (no None)
             task: Task type for equivalence comparison
             extra_info: Optional extra info for verification
             
         Returns:
-            List[int]: cluster size c_i for each sample i
+            List[int]: cluster size c_i for each valid sample i
         """
         N = len(extracted_answers)
         if N == 0:
@@ -131,11 +154,11 @@ class DeltaPasskRewardManager:
         # For math tasks, we need mathematical equivalence checking
         # Group answers that are mathematically equivalent
         if task == "math":
-            # Build equivalence classes using pairwise comparison
+            # Build equivalence classes: compare each unique answer against
+            # existing group representatives. Complexity = O(U²) where U = unique count.
             unique_answers = list(answer_counter.keys())
-            # Map from each unique answer to its canonical representative
-            canonical = {}
-            equivalence_groups = []
+            canonical = {}  # answer_str -> group_idx
+            equivalence_groups = []  # list of lists of equivalent answer strings
             
             for ans in unique_answers:
                 found = False
@@ -177,10 +200,19 @@ class DeltaPasskRewardManager:
         Compute Delta Pass@k rewards for training.
         
         For each prompt group of N samples:
-        1. Decode responses and extract answers
-        2. Cluster answers by equivalence
-        3. Compute g(c) = (c/N) * Δ(c) reward for each sample
-        4. Fill reward_tensor at the last valid token position
+        1. Decode responses and extract answers (preserving None for failures)
+        2. Separate valid vs invalid (unextractable) samples
+        3. Cluster only valid answers using N_valid as universe size
+        4. Compute g(c) = (c/N_valid) * Δ(c) for valid samples
+        5. Assign invalid_penalty for invalid-format samples
+        6. Fill reward_tensor at the last valid token position
+        
+        This design ensures:
+        - Invalid-format samples get reward=invalid_penalty (default 0.0).
+          After Z-score normalization, they naturally receive negative advantage,
+          which discourages the model from producing unextractable outputs.
+        - The ΔPass@k signal is computed strictly over valid answers only,
+          so invalid noise does not pollute the bandpass reward distribution.
         
         Returns:
             Tuple of (reward_tensor, reward_extra_info, delta_passk_info)
@@ -219,7 +251,6 @@ class DeltaPasskRewardManager:
                 valid_prompt_length = data_item.batch["attention_mask"][
                     :prompt_length
                 ].sum()
-                valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
                 response_ids = data_item.batch["responses"]
                 valid_response_length = data_item.batch["attention_mask"][
@@ -245,42 +276,74 @@ class DeltaPasskRewardManager:
                 group_extra_info.append(extra_info)
                 group_valid_response_lengths.append(int(valid_response_length))
 
-            # Step 2: Extract answers and cluster
-            extracted_answers = auto_extract(
-                task, group_responses, extra_info=group_extra_info
-            )
-            cluster_sizes = self._cluster_responses(
-                extracted_answers, task, extra_info=group_extra_info
-            )
+            # Step 2: Extract answers — preserve None for failed extractions
+            raw_answers = self._extract_answers_preserve_none(task, group_responses)
+            # raw_answers[i] is None if extraction failed, else the answer string
 
-            # Step 3: Compute bandpass rewards g(c) = (c/N) * Δ(c)
-            rewards = compute_expected_marginal_passk_rewards(
-                cluster_sizes, N, self.k
-            )
+            # Step 3: Separate valid vs invalid indices
+            valid_indices = []
+            invalid_indices = []
+            valid_answers = []
+            for i, ans in enumerate(raw_answers):
+                if ans is not None and ans != "" and ans != INVALID_ANSWER_SENTINEL:
+                    valid_indices.append(i)
+                    valid_answers.append(ans)
+                else:
+                    invalid_indices.append(i)
 
-            # Step 4: Fill reward_tensor and record scores
+            N_valid = len(valid_answers)
+            N_invalid = len(invalid_indices)
+
+            # Step 4: Cluster only valid answers and compute rewards
+            rewards = [self.invalid_penalty] * N  # default: all get penalty
+
+            if N_valid >= 2:
+                # Enough valid answers to compute meaningful cluster statistics
+                cluster_sizes = self._cluster_responses(
+                    valid_answers, task, extra_info=group_extra_info
+                )
+                valid_rewards = compute_expected_marginal_passk_rewards(
+                    cluster_sizes, N_valid, self.k
+                )
+                for local_idx, global_idx in enumerate(valid_indices):
+                    rewards[global_idx] = valid_rewards[local_idx]
+            elif N_valid == 1:
+                # Only 1 valid answer: c=1, N=1 → Δ(1)=1, g(1)=1/1*1=1
+                # But this is degenerate; give a small positive reward
+                rewards[valid_indices[0]] = 0.0  # neither reward nor punish
+                cluster_sizes = [1]
+            else:
+                # All invalid: cluster_sizes is empty
+                cluster_sizes = []
+
+            # Step 5: Fill reward_tensor and record scores
             for i in range(N):
                 idx = prompt_i * N + i
                 valid_len = group_valid_response_lengths[i]
                 reward_tensor[idx, valid_len - 1] = rewards[i]
                 scores[idx] = rewards[i]
 
-            # Step 5: Collect diagnostic metrics
-            unique_answers = len(set(extracted_answers))
+            # Step 6: Collect diagnostic metrics
+            unique_valid = len(set(valid_answers)) if valid_answers else 0
             max_cluster = max(cluster_sizes) if cluster_sizes else 0
-            avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
+            valid_rewards_only = [rewards[i] for i in valid_indices]
+            avg_reward = np.mean(valid_rewards_only) if valid_rewards_only else 0.0
+            invalid_ratio = N_invalid / N if N > 0 else 0.0
+
             # Find the cluster size with highest reward (bandpass peak)
-            if rewards:
-                peak_idx = rewards.index(max(rewards))
-                peak_c = cluster_sizes[peak_idx]
+            if valid_rewards_only:
+                peak_local_idx = valid_rewards_only.index(max(valid_rewards_only))
+                peak_c = cluster_sizes[peak_local_idx] if peak_local_idx < len(cluster_sizes) else 0
             else:
                 peak_c = 0
 
-            all_metrics["num_unique_answers"].append(unique_answers)
+            all_metrics["num_unique_answers"].append(unique_valid)
             all_metrics["max_cluster_freq"].append(max_cluster)
             all_metrics["avg_delta_reward"].append(avg_reward)
             all_metrics["bandpass_peak_c"].append(peak_c)
-            all_metrics["majority_ratio"].append(max_cluster / N if N > 0 else 0)
+            all_metrics["majority_ratio"].append(max_cluster / N_valid if N_valid > 0 else 0)
+            all_metrics["invalid_ratio"].append(invalid_ratio)
+            all_metrics["n_valid"].append(N_valid)
 
             # Also compute ground-truth accuracy metrics if available
             ground_truth = data[prompt_i * N].non_tensor_batch["reward_model"].get(
@@ -312,9 +375,10 @@ class DeltaPasskRewardManager:
                     skip_special_tokens=False,
                 )
                 print(f"[prompt] {prompt_str[:200]}...")
+                print(f"[valid/invalid] {N_valid}/{N_invalid}")
                 print(f"[cluster_sizes] {cluster_sizes}")
                 print(f"[rewards] {[f'{r:.6f}' for r in rewards]}")
-                print(f"[unique_answers] {unique_answers}, [max_cluster] {max_cluster}")
+                print(f"[unique_answers] {unique_valid}, [max_cluster] {max_cluster}")
 
         # Store scores for downstream access
         data.batch["acc"] = torch.tensor(

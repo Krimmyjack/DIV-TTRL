@@ -213,7 +213,7 @@ def print_results(results, B, K):
     for bucket_name, bucket_fn in buckets.items():
         bucket_results = [r for r in results if bucket_fn(r)]
         if not bucket_results:
-    print(f"\nTotal problems: {total}, Bootstrap iterations: {B}")
+            print(f"\nTotal problems: {total}, Bootstrap iterations: {B}")
 
     buckets = [
         ("Low(<=0.3)", lambda r: r["consistency"] <= 0.3),
