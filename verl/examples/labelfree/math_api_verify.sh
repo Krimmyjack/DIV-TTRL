@@ -11,8 +11,9 @@ export WANDB_ENTITY=2691454060-ucla
 
 # API Self Verification configuration
 export USE_API_SELF_VERIFY=1
-export MODELSCOPE_API_KEY="ms-06ae5daf-b4e6-4451-83ad-c6a272397f65"
-export MODELSCOPE_MODEL="Qwen/Qwen3-4B:DashScope"
+export AUTODL_API_KEY="EMPTY"
+export AUTODL_MODEL="qwen3-4b-base"
+export AUTODL_BASE_URL="https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1"
 export API_VERIFY_TOP_K=5
 export API_VERIFY_SC_THRESHOLD=0.3
 export API_VERIFY_MAX_WORKERS=8
@@ -326,7 +327,7 @@ python -m verl.trainer.main_ppo \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
   algorithm.diversity_density_fallback=grpo \
-  algorithm.diversity_density_k=2 \
+  algorithm.diversity_density_k=4 \
   algorithm.diversity_density_use_metric=consistency_rate \
   algorithm.consistency_threshold=0.8 \
   trainer.logger=['console','wandb'] \

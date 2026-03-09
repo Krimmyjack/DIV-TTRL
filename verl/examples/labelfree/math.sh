@@ -8,6 +8,7 @@ python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --target_dir /root/autodl-tmp/model/test_0.5_threshold_30
 """
 export WANDB_ENTITY=2691454060-ucla
+export USE_API_SELF_VERIFY=0
 # === TTRL Training Script ===
 # Usage: ./evol_rl_no_embedding.sh [--task TASK] [--backbone BACKBONE] [--clip-high] [--temp TEMP]
 #
