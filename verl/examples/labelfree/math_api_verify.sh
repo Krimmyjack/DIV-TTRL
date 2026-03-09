@@ -327,7 +327,7 @@ python -m verl.trainer.main_ppo \
   algorithm.kl_ctrl.kl_coef=0.00 \
   algorithm.adv_estimator=$ADVANTAGE \
   algorithm.diversity_density_fallback=grpo \
-  algorithm.diversity_density_k=2 \
+  algorithm.diversity_density_k=4 \
   algorithm.diversity_density_use_metric=consistency_rate \
   algorithm.consistency_threshold=0.8 \
   trainer.logger=['console','wandb'] \
