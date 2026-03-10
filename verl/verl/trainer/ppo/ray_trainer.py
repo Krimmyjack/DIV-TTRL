@@ -1628,9 +1628,10 @@ class RayPPOTrainer:
                             AdvantageEstimator.PASS_GRPO,
                             AdvantageEstimator.SELECTIVE_PASSK,
                             AdvantageEstimator.ADAPTIVE_PASSK,
+                            AdvantageEstimator.PASS_GRPO_PENALIZED,
                         ]:
                             diversity_density_config = {
-                                "k": getattr(self.config.algorithm, "diversity_density_k", 8),
+                                "k": getattr(self.config.algorithm, "diversity_density_k", 4),
                                 "fallback_estimator": getattr(
                                     self.config.algorithm, "diversity_density_fallback", "grpo"
                                 ),
@@ -1643,6 +1644,12 @@ class RayPPOTrainer:
                                 "selective_passk_threshold": getattr(
                                     self.config.algorithm, "selective_passk_threshold", 0.5
                                 ),
+                                "lam_div": getattr(self.config.algorithm, "lam_div", 0.2),
+                                "c_max": getattr(self.config.algorithm, "c_max", 2.0),
+                                "tau_rep": getattr(self.config.algorithm, "tau_rep", 0.2),
+                                "gamma": getattr(self.config.algorithm, "gamma", 1.5),
+                                "p_max": getattr(self.config.algorithm, "p_max", 0.6),
+                                "n_gram_size": getattr(self.config.algorithm, "n_gram_size", 3),
                             }
                         
                         batch = compute_advantage(
