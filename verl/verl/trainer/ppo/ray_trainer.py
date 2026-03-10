@@ -87,6 +87,7 @@ class AdvantageEstimator(str, Enum):
     SELECTIVE_PASSK = "selective_passk"
     ADAPTIVE_PASSK = "adaptive_passk"
     BOOTSTRAP_PASSK = "bootstrap_passk"
+    PASS_GRPO_PENALIZED = "pass_grpo_penalized"
 
 
 @dataclass
@@ -725,6 +726,39 @@ def compute_advantage(
             data.meta_info["bootstrap_passk/avg_high_advantage"] = advantages[high_idx_t].mean().item()
         
         data.meta_info["bootstrap_passk/avg_total_advantage"] = advantages.mean().item()
+    elif adv_estimator == AdvantageEstimator.PASS_GRPO_PENALIZED:
+        if diversity_density_config is None:
+            diversity_density_config = {}
+        
+        k = diversity_density_config.get("k", 4)
+        epsilon = diversity_density_config.get("epsilon", 1e-6)
+        
+        if "answer_types" not in data.non_tensor_batch:
+            raise ValueError("PASS_GRPO_PENALIZED requires 'answer_types' in data.non_tensor_batch")
+        
+        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
+        if consistency_rates is None:
+            raise ValueError("PASS_GRPO_PENALIZED requires 'consistency_rate' in data.non_tensor_batch")
+            
+        advantages, returns, metrics = core_algos.compute_pass_grpo_penalized_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            responses=data.batch["responses"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            answer_types=data.non_tensor_batch["answer_types"],
+            consistency_rates=consistency_rates,
+            diversity_density_config=diversity_density_config,
+            k=k,
+            epsilon=epsilon
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        
+        # Log metrics to meta_info
+        for k_met, v_met in metrics.items():
+            data.meta_info[k_met] = v_met
+            
+        data.meta_info["pass_grpo_penalized/avg_total_advantage"] = advantages.mean().item()
     else:
         raise NotImplementedError
     return data
@@ -797,6 +831,7 @@ class RayPPOTrainer:
             AdvantageEstimator.SELECTIVE_PASSK,
             AdvantageEstimator.ADAPTIVE_PASSK,
             AdvantageEstimator.BOOTSTRAP_PASSK,
+            AdvantageEstimator.PASS_GRPO_PENALIZED,
         ]:
             self.use_critic = False
         else:
