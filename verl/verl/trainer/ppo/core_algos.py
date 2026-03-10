@@ -484,6 +484,8 @@ def compute_pass_grpo_penalized_advantage(
     gamma = diversity_density_config.get("gamma", 1.5)
     p_max = diversity_density_config.get("p_max", 0.6)
     n_gram_size = diversity_density_config.get("n_gram_size", 3)
+    use_rep_penalty = diversity_density_config.get("use_rep_penalty", False)
+    div_sc_threshold = diversity_density_config.get("div_sc_threshold", 0.3)
     
     prompt_to_samples = defaultdict(list)
     prompt_to_answers = defaultdict(list)
@@ -497,8 +499,10 @@ def compute_pass_grpo_penalized_advantage(
     
     actual_lengths = response_mask.sum(dim=-1).long() # (bs,)
     
-    # Pre-compute P_rep for all samples
+    # Pre-compute P_rep and r_ngram for all samples
     p_rep = torch.zeros(bs, dtype=dtype, device=device)
+    r_ngrams = torch.zeros(bs, dtype=dtype, device=device)
+    
     for i in range(bs):
         valid_len = actual_lengths[i].item()
         if valid_len >= n_gram_size:
@@ -511,8 +515,10 @@ def compute_pass_grpo_penalized_advantage(
             
             if num_total > 0:
                 r_ngram = 1.0 - (num_unique / num_total)
-                penalty = gamma * max(0.0, r_ngram - tau_rep)
-                p_rep[i] = min(penalty, p_max)
+                r_ngrams[i] = r_ngram
+                if use_rep_penalty:
+                    penalty = gamma * max(0.0, r_ngram - tau_rep)
+                    p_rep[i] = min(penalty, p_max)
     
     advantages_raw = torch.zeros(bs, dtype=dtype, device=device)
     
@@ -521,6 +527,8 @@ def compute_pass_grpo_penalized_advantage(
     r_div_count = 0
     total_p_rep = p_rep.sum().item()
     p_rep_count = (p_rep > 0).sum().item()
+    total_r_ngram = r_ngrams.sum().item()
+    r_ngram_count = (r_ngrams > 0).sum().item()
     total_adv_raw = 0.0
     total_a_passk = 0.0
     
@@ -559,7 +567,7 @@ def compute_pass_grpo_penalized_advantage(
             if answers[local_i] == 0:
                 correct_lengths.append(actual_lengths[global_i].item())
                 
-        if sc_ratio > 0.7 and len(correct_lengths) > 0:
+        if sc_ratio > div_sc_threshold and len(correct_lengths) > 0:
             mu_l = sum(correct_lengths) / len(correct_lengths)
             var_l = sum((x - mu_l)**2 for x in correct_lengths) / len(correct_lengths)
             sigma_l = np.sqrt(var_l)
@@ -606,6 +614,8 @@ def compute_pass_grpo_penalized_advantage(
         "pass_grpo_penalized/r_div_triggered_ratio": r_div_count / bs if bs > 0 else 0.0,
         "pass_grpo_penalized/avg_p_rep": total_p_rep / p_rep_count if p_rep_count > 0 else 0.0,
         "pass_grpo_penalized/p_rep_triggered_ratio": p_rep_count / bs if bs > 0 else 0.0,
+        "pass_grpo_penalized/avg_r_ngram": total_r_ngram / r_ngram_count if r_ngram_count > 0 else 0.0,
+        "pass_grpo_penalized/r_ngram_triggered_ratio": r_ngram_count / bs if bs > 0 else 0.0,
         "pass_grpo_penalized/avg_raw_a_passk": total_a_passk / bs if bs > 0 else 0.0,
         "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
     }

@@ -1650,6 +1650,8 @@ class RayPPOTrainer:
                                 "gamma": getattr(self.config.algorithm, "gamma", 1.5),
                                 "p_max": getattr(self.config.algorithm, "p_max", 0.6),
                                 "n_gram_size": getattr(self.config.algorithm, "n_gram_size", 3),
+                                "use_rep_penalty": getattr(self.config.algorithm, "use_rep_penalty", False),
+                                "div_sc_threshold": getattr(self.config.algorithm, "div_sc_threshold", 0.3),
                             }
                         
                         batch = compute_advantage(
