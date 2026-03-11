@@ -1767,6 +1767,22 @@ class RayPPOTrainer:
                         ]:
                             if bp_key in batch.meta_info:
                                 metrics[f"train/{bp_key.replace('/', '_')}"] = float(batch.meta_info[bp_key])
+                                
+                        # Log pass_grpo_penalized metrics if available
+                        for pp_key in [
+                            "pass_grpo_penalized/avg_r_div",
+                            "pass_grpo_penalized/r_div_triggered_ratio",
+                            "pass_grpo_penalized/avg_p_rep",
+                            "pass_grpo_penalized/p_rep_triggered_ratio",
+                            "pass_grpo_penalized/avg_r_ngram",
+                            "pass_grpo_penalized/r_ngram_triggered_ratio",
+                            "pass_grpo_penalized/avg_raw_a_passk",
+                            "pass_grpo_penalized/avg_adv_raw",
+                            "pass_grpo_penalized/avg_total_advantage",
+                        ]:
+                            if pp_key in batch.meta_info:
+                                metrics[f"train/{pp_key.replace('/', '_')}"] = float(batch.meta_info[pp_key])
+
                     # update critic
                     if self.use_critic:
                         with _timer("update_critic", timing_raw):
