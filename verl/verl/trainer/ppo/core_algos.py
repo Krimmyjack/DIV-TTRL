@@ -487,140 +487,144 @@ def compute_pass_grpo_penalized_advantage(
     use_rep_penalty = diversity_density_config.get("use_rep_penalty", False)
     div_sc_threshold = diversity_density_config.get("div_sc_threshold", 0.3)
     
-    prompt_to_samples = defaultdict(list)
-    prompt_to_answers = defaultdict(list)
-    prompt_to_consistency = {}
-    
-    for i in range(bs):
-        prompt_idx = index[i]
-        prompt_to_samples[prompt_idx].append(i)
-        prompt_to_answers[prompt_idx].append(answer_types[i])
-        prompt_to_consistency[prompt_idx] = consistency_rates[i]
-    
-    actual_lengths = response_mask.sum(dim=-1).long() # (bs,)
-    
-    # Pre-compute P_rep and r_ngram for all samples
-    p_rep = torch.zeros(bs, dtype=dtype, device=device)
-    r_ngrams = torch.zeros(bs, dtype=dtype, device=device)
-    
-    for i in range(bs):
-        valid_len = actual_lengths[i].item()
-        if valid_len >= n_gram_size:
-            tokens = responses[i, :valid_len]
-            ngrams = tokens.unfold(0, n_gram_size, 1) # (valid_len - n_gram + 1, n_gram)
-            unique_ngrams = torch.unique(ngrams, dim=0)
-            
-            num_total = float(ngrams.shape[0])
-            num_unique = float(unique_ngrams.shape[0])
-            
-            if num_total > 0:
-                r_ngram = 1.0 - (num_unique / num_total)
-                r_ngrams[i] = r_ngram
-                if use_rep_penalty:
-                    penalty = gamma * max(0.0, r_ngram - tau_rep)
-                    p_rep[i] = min(penalty, p_max)
-    
-    advantages_raw = torch.zeros(bs, dtype=dtype, device=device)
-    
-    # === Logging accumulators ===
-    total_r_div = 0.0
-    r_div_count = 0
-    total_p_rep = p_rep.sum().item()
-    p_rep_count = (p_rep > 0).sum().item()
-    total_r_ngram = r_ngrams.sum().item()
-    r_ngram_count = (r_ngrams > 0).sum().item()
-    total_adv_raw = 0.0
-    total_a_passk = 0.0
-    
-    for prompt_idx, sample_indices in prompt_to_samples.items():
-        N = len(sample_indices)
-        answers = prompt_to_answers[prompt_idx]
-        sc_ratio = prompt_to_consistency[prompt_idx]
+    with torch.no_grad():
+        prompt_to_samples = defaultdict(list)
+        prompt_to_answers = defaultdict(list)
+        prompt_to_consistency = {}
         
-        c_maj = sum(1 for a in answers if a == 0)
-        c_neg = N - c_maj
+        for i in range(bs):
+            prompt_idx = index[i]
+            prompt_to_samples[prompt_idx].append(i)
+            prompt_to_answers[prompt_idx].append(answer_types[i])
+            prompt_to_consistency[prompt_idx] = consistency_rates[i]
         
-        log_prob_fail = _log_comb(np.array([c_neg]), np.array([k]))[0] - _log_comb(np.array([N]), np.array([k]))[0]
-        prob_fail = np.exp(log_prob_fail) if np.isfinite(log_prob_fail) else 0.0
-        prob_fail = np.clip(prob_fail, 0.0, 1.0)
-        r_mean = 1.0 - prob_fail
-        variance = r_mean * (1.0 - r_mean)
-        std = np.sqrt(variance)
+        actual_lengths = response_mask.sum(dim=-1).long() # (bs,)
         
-        if std < epsilon:
-            a_pos, a_neg = 0.0, 0.0
-        else:
-            a_pos = prob_fail / std
-            if c_neg >= 1:
-                log_p_cond_fail = _log_comb(np.array([c_neg - 1]), np.array([k - 1]))[0] - _log_comb(np.array([N - 1]), np.array([k - 1]))[0]
-                p_cond_fail = np.exp(log_p_cond_fail) if np.isfinite(log_p_cond_fail) else 0.0
-                p_cond_fail = np.clip(p_cond_fail, 0.0, 1.0)
-            else:
-                p_cond_fail = 0.0
-            a_neg = (prob_fail - p_cond_fail) / std
-            
-        group_raw_adv = torch.zeros(N, dtype=dtype, device=device)
-        group_r_div = torch.zeros(N, dtype=dtype, device=device)
+        # Pre-compute P_rep and r_ngram for all samples
+        p_rep = torch.zeros(bs, dtype=dtype, device=device)
+        r_ngrams = torch.zeros(bs, dtype=dtype, device=device)
         
-        correct_lengths = []
-        for local_i, global_i in enumerate(sample_indices):
-            if answers[local_i] == 0:
-                correct_lengths.append(actual_lengths[global_i].item())
+        for i in range(bs):
+            valid_len = actual_lengths[i].item()
+            if valid_len >= n_gram_size:
+                with torch.no_grad():
+                    tokens = responses[i, :valid_len]
+                    ngrams = tokens.unfold(0, n_gram_size, 1) # (valid_len - n_gram + 1, n_gram)
+                    unique_ngrams = torch.unique(ngrams, dim=0)
+                    
+                    num_total = float(ngrams.shape[0])
+                    num_unique = float(unique_ngrams.shape[0])
                 
-        if sc_ratio > div_sc_threshold and len(correct_lengths) > 0:
-            mu_l = sum(correct_lengths) / len(correct_lengths)
-            var_l = sum((x - mu_l)**2 for x in correct_lengths) / len(correct_lengths)
-            sigma_l = np.sqrt(var_l)
+                if num_total > 0:
+                    r_ngram = 1.0 - (num_unique / num_total)
+                    r_ngrams[i] = r_ngram
+                    if use_rep_penalty:
+                        penalty = gamma * max(0.0, r_ngram - tau_rep)
+                        p_rep[i] = min(penalty, p_max)
+        
+        with torch.no_grad():
+            advantages_raw = torch.zeros(bs, dtype=dtype, device=device)
+        
+        # === Logging accumulators ===
+        total_r_div = 0.0
+        r_div_count = 0
+        total_p_rep = p_rep.sum().item()
+        p_rep_count = (p_rep > 0).sum().item()
+        total_r_ngram = r_ngrams.sum().item()
+        r_ngram_count = (r_ngrams > 0).sum().item()
+        total_adv_raw = 0.0
+        total_a_passk = 0.0
+        
+        for prompt_idx, sample_indices in prompt_to_samples.items():
+            N = len(sample_indices)
+            answers = prompt_to_answers[prompt_idx]
+            sc_ratio = prompt_to_consistency[prompt_idx]
             
+            c_maj = sum(1 for a in answers if a == 0)
+            c_neg = N - c_maj
+            
+            log_prob_fail = _log_comb(np.array([c_neg]), np.array([k]))[0] - _log_comb(np.array([N]), np.array([k]))[0]
+            prob_fail = np.exp(log_prob_fail) if np.isfinite(log_prob_fail) else 0.0
+            prob_fail = np.clip(prob_fail, 0.0, 1.0)
+            r_mean = 1.0 - prob_fail
+            variance = r_mean * (1.0 - r_mean)
+            std = np.sqrt(variance)
+            
+            if std < epsilon:
+                a_pos, a_neg = 0.0, 0.0
+            else:
+                a_pos = prob_fail / std
+                if c_neg >= 1:
+                    log_p_cond_fail = _log_comb(np.array([c_neg - 1]), np.array([k - 1]))[0] - _log_comb(np.array([N - 1]), np.array([k - 1]))[0]
+                    p_cond_fail = np.exp(log_p_cond_fail) if np.isfinite(log_p_cond_fail) else 0.0
+                    p_cond_fail = np.clip(p_cond_fail, 0.0, 1.0)
+                else:
+                    p_cond_fail = 0.0
+                a_neg = (prob_fail - p_cond_fail) / std
+                
+            group_raw_adv = torch.zeros(N, dtype=dtype, device=device)
+            group_r_div = torch.zeros(N, dtype=dtype, device=device)
+            
+            correct_lengths = []
             for local_i, global_i in enumerate(sample_indices):
                 if answers[local_i] == 0:
-                    l_i = actual_lengths[global_i].item()
-                    div_val = abs(l_i - mu_l) / (sigma_l + 1e-5)
-                    reward_div = lam_div * min(div_val, c_max)
-                    group_r_div[local_i] = reward_div
+                    correct_lengths.append(actual_lengths[global_i].item())
                     
-                    if reward_div > 0:
-                        total_r_div += reward_div
-                        r_div_count += 1
-
-        for local_i, global_i in enumerate(sample_indices):
-            a_pass_k = a_pos if answers[local_i] == 0 else a_neg
-            raw_v = a_pass_k + group_r_div[local_i] - p_rep[global_i]
-            group_raw_adv[local_i] = raw_v
-            
-            total_a_passk += a_pass_k
-            total_adv_raw += raw_v
-            
-        if N > 1:
-            mu_adv = group_raw_adv.mean()
-            std_adv = group_raw_adv.std(unbiased=False)
-            group_final_adv = (group_raw_adv - mu_adv) / (std_adv + epsilon)
-        else:
-            group_final_adv = torch.zeros_like(group_raw_adv)
-            
-        for local_i, global_i in enumerate(sample_indices):
-            advantages_raw[global_i] = group_final_adv[local_i]
-
-    # Return meta_info metrics back to trainer
-    # We will return them as a dictionary tuple or just let the caller know, 
-    # but the usual way `core_algos` returns is just `advantages, returns`.
-    # Wait, the prompt says "I want to observe the training effectiveness", 
-    # so we should somehow sneak this into the ray_trainer.py `data.meta_info`.
-    # The signature of `compute_pass_grpo_penalized_advantage` returns Tuple[torch.Tensor, torch.Tensor]. 
-    # Let's add returning `dict` of metrics.
+            if sc_ratio > div_sc_threshold and len(correct_lengths) > 0:
+                mu_l = sum(correct_lengths) / len(correct_lengths)
+                var_l = sum((x - mu_l)**2 for x in correct_lengths) / len(correct_lengths)
+                sigma_l = np.sqrt(var_l)
+                
+                for local_i, global_i in enumerate(sample_indices):
+                    if answers[local_i] == 0:
+                        l_i = actual_lengths[global_i].item()
+                        div_val = abs(l_i - mu_l) / (sigma_l + 1e-5)
+                        reward_div = lam_div * min(div_val, c_max)
+                        group_r_div[local_i] = reward_div
+                        
+                        if reward_div > 0:
+                            total_r_div += reward_div
+                            r_div_count += 1
     
-    metrics = {
-        "pass_grpo_penalized/avg_r_div": total_r_div / r_div_count if r_div_count > 0 else 0.0,
-        "pass_grpo_penalized/r_div_triggered_ratio": r_div_count / bs if bs > 0 else 0.0,
-        "pass_grpo_penalized/avg_p_rep": total_p_rep / p_rep_count if p_rep_count > 0 else 0.0,
-        "pass_grpo_penalized/p_rep_triggered_ratio": p_rep_count / bs if bs > 0 else 0.0,
-        "pass_grpo_penalized/avg_r_ngram": total_r_ngram / r_ngram_count if r_ngram_count > 0 else 0.0,
-        "pass_grpo_penalized/r_ngram_triggered_ratio": r_ngram_count / bs if bs > 0 else 0.0,
-        "pass_grpo_penalized/avg_raw_a_passk": total_a_passk / bs if bs > 0 else 0.0,
-        "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
-    }
-
-    advantages = advantages_raw.unsqueeze(-1) * response_mask
+            for local_i, global_i in enumerate(sample_indices):
+                a_pass_k = a_pos if answers[local_i] == 0 else a_neg
+                raw_v = a_pass_k + group_r_div[local_i] - p_rep[global_i]
+                group_raw_adv[local_i] = raw_v
+                
+                total_a_passk += a_pass_k
+                total_adv_raw += raw_v
+                
+            if N > 1:
+                mu_adv = group_raw_adv.mean()
+                std_adv = group_raw_adv.std(unbiased=False)
+                group_final_adv = (group_raw_adv - mu_adv) / (std_adv + epsilon)
+            else:
+                group_final_adv = torch.zeros_like(group_raw_adv)
+                
+            for local_i, global_i in enumerate(sample_indices):
+                advantages_raw[global_i] = group_final_adv[local_i]
+    
+        # Return meta_info metrics back to trainer
+        # We will return them as a dictionary tuple or just let the caller know, 
+        # but the usual way `core_algos` returns is just `advantages, returns`.
+        # Wait, the prompt says "I want to observe the training effectiveness", 
+        # so we should somehow sneak this into the ray_trainer.py `data.meta_info`.
+        # The signature of `compute_pass_grpo_penalized_advantage` returns Tuple[torch.Tensor, torch.Tensor]. 
+        # Let's add returning `dict` of metrics.
+        
+        metrics = {
+            "pass_grpo_penalized/avg_r_div": total_r_div / r_div_count if r_div_count > 0 else 0.0,
+            "pass_grpo_penalized/r_div_triggered_ratio": r_div_count / bs if bs > 0 else 0.0,
+            "pass_grpo_penalized/avg_p_rep": total_p_rep / p_rep_count if p_rep_count > 0 else 0.0,
+            "pass_grpo_penalized/p_rep_triggered_ratio": p_rep_count / bs if bs > 0 else 0.0,
+            "pass_grpo_penalized/avg_r_ngram": total_r_ngram / r_ngram_count if r_ngram_count > 0 else 0.0,
+            "pass_grpo_penalized/r_ngram_triggered_ratio": r_ngram_count / bs if bs > 0 else 0.0,
+            "pass_grpo_penalized/avg_raw_a_passk": total_a_passk / bs if bs > 0 else 0.0,
+            "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
+        }
+    
+        advantages = advantages_raw.unsqueeze(-1) * response_mask
+        
     return advantages, advantages.clone(), metrics
 
 
