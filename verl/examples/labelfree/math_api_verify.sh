@@ -13,7 +13,7 @@ export WANDB_ENTITY=2691454060-ucla
 export USE_API_SELF_VERIFY=1
 export AUTODL_API_KEY="EMPTY"
 export AUTODL_MODEL="qwen3-4b-base"
-export AUTODL_BASE_URL="https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1"
+export AUTODL_BASE_URL="https://u630113-8ba4-8da84932.westc.seetacloud.com:8443/v1"
 export API_VERIFY_TOP_K=5
 export API_VERIFY_SC_THRESHOLD=0.3
 export API_VERIFY_MAX_WORKERS=8
@@ -153,7 +153,7 @@ DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 # TIME_TAG=182434
 
-ADVANTAGE="pass_grpo"
+ADVANTAGE="pass_grpo_penalized"
 
 echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"

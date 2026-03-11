@@ -12,7 +12,7 @@ from verl.utils.reward_score.ttrl.auto_extract import auto_extract
 
 # You can override these via environment variables if needed
 API_KEY = os.environ.get("AUTODL_API_KEY", "EMPTY")
-BASE_URL = os.environ.get("AUTODL_BASE_URL", "https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1")
+BASE_URL = os.environ.get("AUTODL_BASE_URL", "https://u630113-8ba4-8da84932.westc.seetacloud.com:8443/v1")
 MODEL = os.environ.get("AUTODL_MODEL", "qwen3-4b-base")
 
 # =====================================================

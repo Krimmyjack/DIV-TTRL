@@ -1644,14 +1644,14 @@ class RayPPOTrainer:
                                 "selective_passk_threshold": getattr(
                                     self.config.algorithm, "selective_passk_threshold", 0.5
                                 ),
-                                "lam_div": getattr(self.config.algorithm, "lam_div", 0.2),
+                                "lam_div": getattr(self.config.algorithm, "lam_div", 0.05),
                                 "c_max": getattr(self.config.algorithm, "c_max", 2.0),
                                 "tau_rep": getattr(self.config.algorithm, "tau_rep", 0.2),
-                                "gamma": getattr(self.config.algorithm, "gamma", 1.5),
-                                "p_max": getattr(self.config.algorithm, "p_max", 0.6),
+                                "gamma": getattr(self.config.algorithm, "gamma", 1.0),
+                                "p_max": getattr(self.config.algorithm, "p_max", 0.15),
                                 "n_gram_size": getattr(self.config.algorithm, "n_gram_size", 3),
                                 "use_rep_penalty": getattr(self.config.algorithm, "use_rep_penalty", False),
-                                "div_sc_threshold": getattr(self.config.algorithm, "div_sc_threshold", 0.3),
+                                "div_sc_threshold": getattr(self.config.algorithm, "div_sc_threshold", 0.5),
                             }
                         
                         batch = compute_advantage(
