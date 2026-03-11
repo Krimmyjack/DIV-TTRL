@@ -620,6 +620,7 @@ def compute_pass_grpo_penalized_advantage(
         "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
     }
 
+    advantages = advantages_raw.unsqueeze(-1) * response_mask
     return advantages, advantages.clone(), metrics
 
 
