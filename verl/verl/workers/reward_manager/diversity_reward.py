@@ -60,6 +60,7 @@ class DiversityTTRLRewardManager:
         n_samples_per_prompt: int = 1,
         mode: str = "eval",
         eval_n_samples: int = 1,
+        **kwargs,
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine

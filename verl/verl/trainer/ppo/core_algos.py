@@ -627,6 +627,12 @@ def compute_pass_grpo_penalized_advantage(
         advantages_raw_tensor = torch.tensor(advantages_raw_np, dtype=dtype, device=device)
         advantages = advantages_raw_tensor.unsqueeze(-1) * response_mask
         returns = advantages  # outcome-based: returns == advantages, no need to clone
+
+        # explicitly free cpu numpy caches to cut the potential ties with python GC that delays GPU free
+        del actual_lengths_cpu
+        if enable_ngram_penalty:
+            del responses_cpu
+        del advantages_raw_np
         
     return advantages, returns, metrics
 

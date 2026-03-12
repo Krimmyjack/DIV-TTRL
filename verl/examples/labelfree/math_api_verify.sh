@@ -1,16 +1,16 @@
 #!/bin/bash
 """
-bash examples/labelfree/math_api_verify.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+ENABLE_NGRAM_PENALTY=False bash examples/labelfree/math_api_verify.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --backend fsdp \
-    --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/220024/global_step_45/actor \
+    --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/114540/global_step_30/actor \
     --hf_model_path /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
-    --target_dir /root/autodl-tmp/model/math_step_45_adaptive_passk
+    --target_dir /root/autodl-tmp/model/math_step_30_len_div
 """
 export WANDB_ENTITY=2691454060-ucla
 
 # API Self Verification configuration
-export USE_API_SELF_VERIFY=1
+export USE_API_SELF_VERIFY=0
 export AUTODL_API_KEY="EMPTY"
 export AUTODL_MODEL="qwen3-4b-base"
 export AUTODL_BASE_URL="https://u630113-8ba4-8da84932.westc.seetacloud.com:8443/v1"
@@ -150,8 +150,8 @@ echo "========================="
 # ------------------------------------------------------------
 
 DATE=$(date +%m%d)
-TIME_TAG=$(date +%H%M%S)
-# TIME_TAG=182434
+# TIME_TAG=$(date +%H%M%S)
+TIME_TAG=114540
 
 ADVANTAGE="pass_grpo_penalized"
 
@@ -175,9 +175,9 @@ else
 fi
 
 # Set EPISODE
-EPISODE=4
+EPISODE=3
 DATA_TRAIN_BATCH_SIZE=32
-N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
+N_VOTES_PER_PROMPT=48 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
 MICRO_BATCH_SIZE=2 # Increase micro batch to better utilize GPU
@@ -308,7 +308,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
   actor_rollout_ref.rollout.do_vote=True \
   actor_rollout_ref.rollout.n_vote=$N_VOTES_PER_PROMPT \
   actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \

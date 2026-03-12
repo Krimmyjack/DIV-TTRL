@@ -1831,10 +1831,19 @@ class RayPPOTrainer:
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # Explicitly free batch and metrics from this step to prevent memory leaks from python's delayed GC
+                del batch, batch_dict
+                if 'gen_batch' in locals():
+                    del gen_batch
+                if 'gen_batch_output' in locals():
+                    del gen_batch_output
+                import gc
+                gc.collect()
+
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
 
                 progress_bar.update(1)
-                self.global_steps += 1
+                self.global_steps += 1
