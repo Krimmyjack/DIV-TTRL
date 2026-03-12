@@ -462,7 +462,6 @@ def compute_pass_grpo_advantage(
 
 def compute_pass_grpo_penalized_advantage(
     token_level_rewards: torch.Tensor,
-    responses: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     answer_types: np.ndarray,
@@ -473,6 +472,10 @@ def compute_pass_grpo_penalized_advantage(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute pass_grpo advantage with length diversity reward.
+    
+    All intermediate computation is done on CPU/numpy to avoid CUDA memory
+    fragmentation from many small GPU tensor allocations in loops.
+    Only the final advantage tensor is created on GPU.
     
     Components:
     - A_pass@k: pass@k-based advantage (combinatorial)
@@ -497,8 +500,11 @@ def compute_pass_grpo_penalized_advantage(
             prompt_to_answers[prompt_idx].append(answer_types[i])
             prompt_to_consistency[prompt_idx] = consistency_rates[i]
         
-        actual_lengths = response_mask.sum(dim=-1).long()  # (bs,)
-        advantages_raw = torch.zeros(bs, dtype=dtype, device=device)
+        # Move actual_lengths to CPU once, avoid per-item .item() GPU sync in loop
+        actual_lengths_cpu = response_mask.sum(dim=-1).long().cpu().numpy()  # (bs,)
+        
+        # All intermediate computation on CPU/numpy
+        advantages_raw_np = np.zeros(bs, dtype=np.float64)
         
         # === Logging accumulators ===
         total_r_div = 0.0
@@ -532,14 +538,15 @@ def compute_pass_grpo_penalized_advantage(
                 else:
                     p_cond_fail = 0.0
                 a_neg = (prob_fail - p_cond_fail) / std
-                
-            group_raw_adv = torch.zeros(N, dtype=dtype, device=device)
-            group_r_div = torch.zeros(N, dtype=dtype, device=device)
+            
+            # All group-level computation on CPU with numpy
+            group_raw_adv = np.zeros(N, dtype=np.float64)
+            group_r_div = np.zeros(N, dtype=np.float64)
             
             correct_lengths = []
             for local_i, global_i in enumerate(sample_indices):
                 if answers[local_i] == 0:
-                    correct_lengths.append(actual_lengths[global_i].item())
+                    correct_lengths.append(int(actual_lengths_cpu[global_i]))
                     
             if sc_ratio > div_sc_threshold and len(correct_lengths) > 0:
                 mu_l = sum(correct_lengths) / len(correct_lengths)
@@ -548,7 +555,7 @@ def compute_pass_grpo_penalized_advantage(
                 
                 for local_i, global_i in enumerate(sample_indices):
                     if answers[local_i] == 0:
-                        l_i = actual_lengths[global_i].item()
+                        l_i = int(actual_lengths_cpu[global_i])
                         div_val = abs(l_i - mu_l) / (sigma_l + 1e-5)
                         reward_div = lam_div * min(div_val, c_max)
                         group_r_div[local_i] = reward_div
@@ -559,21 +566,21 @@ def compute_pass_grpo_penalized_advantage(
     
             for local_i, global_i in enumerate(sample_indices):
                 a_pass_k = a_pos if answers[local_i] == 0 else a_neg
-                raw_v = a_pass_k + group_r_div[local_i].item()
+                raw_v = a_pass_k + group_r_div[local_i]
                 group_raw_adv[local_i] = raw_v
                 
                 total_a_passk += a_pass_k
                 total_adv_raw += raw_v
                 
             if N > 1:
-                mu_adv = group_raw_adv.mean()
-                std_adv = group_raw_adv.std(unbiased=False)
+                mu_adv = np.mean(group_raw_adv)
+                std_adv = np.std(group_raw_adv, ddof=0)
                 group_final_adv = (group_raw_adv - mu_adv) / (std_adv + epsilon)
             else:
-                group_final_adv = torch.zeros_like(group_raw_adv)
+                group_final_adv = np.zeros_like(group_raw_adv)
                 
             for local_i, global_i in enumerate(sample_indices):
-                advantages_raw[global_i] = group_final_adv[local_i]
+                advantages_raw_np[global_i] = group_final_adv[local_i]
     
         metrics = {
             "pass_grpo_penalized/avg_r_div": total_r_div / r_div_count if r_div_count > 0 else 0.0,
@@ -582,8 +589,10 @@ def compute_pass_grpo_penalized_advantage(
             "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
         }
     
-        advantages = advantages_raw.unsqueeze(-1) * response_mask
-        returns = advantages.detach().clone()
+        # Create GPU tensors only once at the end
+        advantages_raw_tensor = torch.tensor(advantages_raw_np, dtype=dtype, device=device)
+        advantages = advantages_raw_tensor.unsqueeze(-1) * response_mask
+        returns = advantages  # outcome-based: returns == advantages, no need to clone
         
     return advantages, returns, metrics
 

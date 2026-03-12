@@ -742,7 +742,6 @@ def compute_advantage(
             
         advantages, returns, metrics = core_algos.compute_pass_grpo_penalized_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
-            responses=data.batch["responses"],
             response_mask=data.batch["response_mask"],
             index=data.non_tensor_batch["uid"],
             answer_types=data.non_tensor_batch["answer_types"],
