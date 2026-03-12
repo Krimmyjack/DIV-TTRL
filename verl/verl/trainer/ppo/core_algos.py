@@ -472,7 +472,11 @@ def compute_pass_grpo_penalized_advantage(
     epsilon: float = 1e-6
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute pass_grpo advantage with diversity reward and n-gram penalty.
+    Compute pass_grpo advantage with length diversity reward.
+    
+    Components:
+    - A_pass@k: pass@k-based advantage (combinatorial)
+    - R_div: length diversity reward for correct answers when sc > threshold
     """
     bs, response_length = token_level_rewards.shape
     device = token_level_rewards.device
@@ -480,11 +484,6 @@ def compute_pass_grpo_penalized_advantage(
     
     lam_div = diversity_density_config.get("lam_div", 0.2)
     c_max = diversity_density_config.get("c_max", 2.0)
-    tau_rep = diversity_density_config.get("tau_rep", 0.2)
-    gamma = diversity_density_config.get("gamma", 1.5)
-    p_max = diversity_density_config.get("p_max", 0.6)
-    n_gram_size = diversity_density_config.get("n_gram_size", 3)
-    use_rep_penalty = diversity_density_config.get("use_rep_penalty", False)
     div_sc_threshold = diversity_density_config.get("div_sc_threshold", 0.3)
     
     with torch.no_grad():
@@ -498,40 +497,12 @@ def compute_pass_grpo_penalized_advantage(
             prompt_to_answers[prompt_idx].append(answer_types[i])
             prompt_to_consistency[prompt_idx] = consistency_rates[i]
         
-        actual_lengths = response_mask.sum(dim=-1).long() # (bs,)
-        
-        # Pre-compute P_rep and r_ngram for all samples
-        p_rep = torch.zeros(bs, dtype=dtype, device=device)
-        r_ngrams = torch.zeros(bs, dtype=dtype, device=device)
-        
-        for i in range(bs):
-            valid_len = actual_lengths[i].item()
-            if valid_len >= n_gram_size:
-                with torch.no_grad():
-                    tokens = responses[i, :valid_len]
-                    ngrams = tokens.unfold(0, n_gram_size, 1) # (valid_len - n_gram + 1, n_gram)
-                    unique_ngrams = torch.unique(ngrams, dim=0)
-                    
-                    num_total = float(ngrams.shape[0])
-                    num_unique = float(unique_ngrams.shape[0])
-                
-                if num_total > 0:
-                    r_ngram = 1.0 - (num_unique / num_total)
-                    r_ngrams[i] = r_ngram
-                    if use_rep_penalty:
-                        penalty = gamma * max(0.0, r_ngram - tau_rep)
-                        p_rep[i] = min(penalty, p_max)
-        
-        with torch.no_grad():
-            advantages_raw = torch.zeros(bs, dtype=dtype, device=device)
+        actual_lengths = response_mask.sum(dim=-1).long()  # (bs,)
+        advantages_raw = torch.zeros(bs, dtype=dtype, device=device)
         
         # === Logging accumulators ===
         total_r_div = 0.0
         r_div_count = 0
-        total_p_rep = p_rep.sum().item()
-        p_rep_count = (p_rep > 0).sum().item()
-        total_r_ngram = r_ngrams.sum().item()
-        r_ngram_count = (r_ngrams > 0).sum().item()
         total_adv_raw = 0.0
         total_a_passk = 0.0
         
@@ -588,7 +559,7 @@ def compute_pass_grpo_penalized_advantage(
     
             for local_i, global_i in enumerate(sample_indices):
                 a_pass_k = a_pos if answers[local_i] == 0 else a_neg
-                raw_v = a_pass_k + group_r_div[local_i] - p_rep[global_i]
+                raw_v = a_pass_k + group_r_div[local_i].item()
                 group_raw_adv[local_i] = raw_v
                 
                 total_a_passk += a_pass_k
@@ -604,28 +575,17 @@ def compute_pass_grpo_penalized_advantage(
             for local_i, global_i in enumerate(sample_indices):
                 advantages_raw[global_i] = group_final_adv[local_i]
     
-        # Return meta_info metrics back to trainer
-        # We will return them as a dictionary tuple or just let the caller know, 
-        # but the usual way `core_algos` returns is just `advantages, returns`.
-        # Wait, the prompt says "I want to observe the training effectiveness", 
-        # so we should somehow sneak this into the ray_trainer.py `data.meta_info`.
-        # The signature of `compute_pass_grpo_penalized_advantage` returns Tuple[torch.Tensor, torch.Tensor]. 
-        # Let's add returning `dict` of metrics.
-        
         metrics = {
             "pass_grpo_penalized/avg_r_div": total_r_div / r_div_count if r_div_count > 0 else 0.0,
             "pass_grpo_penalized/r_div_triggered_ratio": r_div_count / bs if bs > 0 else 0.0,
-            "pass_grpo_penalized/avg_p_rep": total_p_rep / p_rep_count if p_rep_count > 0 else 0.0,
-            "pass_grpo_penalized/p_rep_triggered_ratio": p_rep_count / bs if bs > 0 else 0.0,
-            "pass_grpo_penalized/avg_r_ngram": total_r_ngram / r_ngram_count if r_ngram_count > 0 else 0.0,
-            "pass_grpo_penalized/r_ngram_triggered_ratio": r_ngram_count / bs if bs > 0 else 0.0,
             "pass_grpo_penalized/avg_raw_a_passk": total_a_passk / bs if bs > 0 else 0.0,
             "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
         }
     
         advantages = advantages_raw.unsqueeze(-1) * response_mask
+        returns = advantages.detach().clone()
         
-    return advantages, advantages.clone(), metrics
+    return advantages, returns, metrics
 
 
 

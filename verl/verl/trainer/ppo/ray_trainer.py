@@ -1772,10 +1772,6 @@ class RayPPOTrainer:
                         for pp_key in [
                             "pass_grpo_penalized/avg_r_div",
                             "pass_grpo_penalized/r_div_triggered_ratio",
-                            "pass_grpo_penalized/avg_p_rep",
-                            "pass_grpo_penalized/p_rep_triggered_ratio",
-                            "pass_grpo_penalized/avg_r_ngram",
-                            "pass_grpo_penalized/r_ngram_triggered_ratio",
                             "pass_grpo_penalized/avg_raw_a_passk",
                             "pass_grpo_penalized/avg_adv_raw",
                             "pass_grpo_penalized/avg_total_advantage",
