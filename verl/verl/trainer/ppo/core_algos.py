@@ -462,6 +462,7 @@ def compute_pass_grpo_advantage(
 
 def compute_pass_grpo_penalized_advantage(
     token_level_rewards: torch.Tensor,
+    responses: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     answer_types: np.ndarray,
@@ -469,9 +470,9 @@ def compute_pass_grpo_penalized_advantage(
     diversity_density_config: dict,
     k: int,
     epsilon: float = 1e-6
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, dict]:
     """
-    Compute pass_grpo advantage with length diversity reward.
+    Compute pass_grpo advantage with length diversity reward and n-gram penalty.
     
     All intermediate computation is done on CPU/numpy to avoid CUDA memory
     fragmentation from many small GPU tensor allocations in loops.
@@ -480,6 +481,7 @@ def compute_pass_grpo_penalized_advantage(
     Components:
     - A_pass@k: pass@k-based advantage (combinatorial)
     - R_div: length diversity reward for correct answers when sc > threshold
+    - P_rep: n-gram repetition penalty based on min(gamma * max(0, R_ngram - tau), p_max)
     """
     bs, response_length = token_level_rewards.shape
     device = token_level_rewards.device
@@ -488,6 +490,13 @@ def compute_pass_grpo_penalized_advantage(
     lam_div = diversity_density_config.get("lam_div", 0.2)
     c_max = diversity_density_config.get("c_max", 2.0)
     div_sc_threshold = diversity_density_config.get("div_sc_threshold", 0.3)
+    
+    # n-gram penalty hyper-parameters
+    enable_ngram_penalty = diversity_density_config.get("enable_ngram_penalty", False)
+    ngram_gamma = diversity_density_config.get("ngram_gamma", 1.0)
+    ngram_tau = diversity_density_config.get("ngram_tau", 0.4)
+    ngram_p_max = diversity_density_config.get("ngram_p_max", 0.2)
+    ngram_n = diversity_density_config.get("ngram_n", 4)
     
     with torch.no_grad():
         prompt_to_samples = defaultdict(list)
@@ -502,6 +511,7 @@ def compute_pass_grpo_penalized_advantage(
         
         # Move actual_lengths to CPU once, avoid per-item .item() GPU sync in loop
         actual_lengths_cpu = response_mask.sum(dim=-1).long().cpu().numpy()  # (bs,)
+        responses_cpu = responses.cpu().numpy() if enable_ngram_penalty else None # Extract responses to CPU only if needed
         
         # All intermediate computation on CPU/numpy
         advantages_raw_np = np.zeros(bs, dtype=np.float64)
@@ -509,6 +519,8 @@ def compute_pass_grpo_penalized_advantage(
         # === Logging accumulators ===
         total_r_div = 0.0
         r_div_count = 0
+        total_p_rep = 0.0
+        p_rep_count = 0
         total_adv_raw = 0.0
         total_a_passk = 0.0
         
@@ -566,7 +578,25 @@ def compute_pass_grpo_penalized_advantage(
     
             for local_i, global_i in enumerate(sample_indices):
                 a_pass_k = a_pos if answers[local_i] == 0 else a_neg
-                raw_v = a_pass_k + group_r_div[local_i]
+                
+                # --- N-Gram Repetition Penalty ---
+                p_rep = 0.0
+                if enable_ngram_penalty:
+                    l_i = int(actual_lengths_cpu[global_i])
+                    seq = responses_cpu[global_i, :l_i]
+                    
+                    if l_i >= ngram_n:
+                        # Rolling window to compute fast set of n-grams
+                        ngrams = set(tuple(seq[j:j+ngram_n]) for j in range(l_i - ngram_n + 1))
+                        r_ngram = 1.0 - len(ngrams) / (l_i - ngram_n + 1)
+                        p_rep = min(ngram_gamma * max(0.0, r_ngram - ngram_tau), ngram_p_max)
+                        
+                        if p_rep > 0:
+                            total_p_rep += p_rep
+                            p_rep_count += 1
+                
+                # raw_adv_i = A_pass@k + R_div - P_rep
+                raw_v = a_pass_k + group_r_div[local_i] - p_rep
                 group_raw_adv[local_i] = raw_v
                 
                 total_a_passk += a_pass_k
@@ -588,6 +618,10 @@ def compute_pass_grpo_penalized_advantage(
             "pass_grpo_penalized/avg_raw_a_passk": total_a_passk / bs if bs > 0 else 0.0,
             "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
         }
+        
+        if enable_ngram_penalty:
+            metrics["pass_grpo_penalized/avg_p_rep"] = total_p_rep / p_rep_count if p_rep_count > 0 else 0.0
+            metrics["pass_grpo_penalized/p_rep_triggered_ratio"] = p_rep_count / bs if bs > 0 else 0.0
     
         # Create GPU tensors only once at the end
         advantages_raw_tensor = torch.tensor(advantages_raw_np, dtype=dtype, device=device)

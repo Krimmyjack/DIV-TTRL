@@ -742,6 +742,7 @@ def compute_advantage(
             
         advantages, returns, metrics = core_algos.compute_pass_grpo_penalized_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
+            responses=data.batch["responses"],
             response_mask=data.batch["response_mask"],
             index=data.non_tensor_batch["uid"],
             answer_types=data.non_tensor_batch["answer_types"],
@@ -1190,6 +1191,15 @@ class RayPPOTrainer:
         if self.use_ttrl and "ttrl_info" in result:
             for key, val in result["ttrl_info"].items():
                 metric_dict[f"val-ttrl/{key}"] = val
+
+        # Clean up memory explicitly to prevent OOM in subsequent generation
+        import gc
+        del test_batch, test_gen_batch, test_gen_batch_padded, test_output_gen_batch
+        del input_ids, output_ids
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return metric_dict
 
