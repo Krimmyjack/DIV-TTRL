@@ -1,6 +1,6 @@
 #!/bin/bash
 """
-ENABLE_NGRAM_PENALTY=False bash examples/labelfree/math_api_verify.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
+bash examples/labelfree/math_api_verify.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --backend fsdp \
     --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/114540/global_step_30/actor \
@@ -150,8 +150,8 @@ echo "========================="
 # ------------------------------------------------------------
 
 DATE=$(date +%m%d)
-# TIME_TAG=$(date +%H%M%S)
-TIME_TAG=114540
+TIME_TAG=$(date +%H%M%S)
+# TIME_TAG=114540
 
 ADVANTAGE="pass_grpo_penalized"
 
@@ -175,9 +175,9 @@ else
 fi
 
 # Set EPISODE
-EPISODE=3
-DATA_TRAIN_BATCH_SIZE=32
-N_VOTES_PER_PROMPT=48 # Reduce candidates to balance computational overhead
+EPISODE=4
+DATA_TRAIN_BATCH_SIZE=16
+N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
 MICRO_BATCH_SIZE=2 # Increase micro batch to better utilize GPU
