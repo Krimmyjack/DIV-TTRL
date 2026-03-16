@@ -127,6 +127,62 @@ def extract_model_answer(response_text: str) -> str:
     answer = remove_boxed(boxed_part)
     return answer.strip()
 
+def compute_response_metrics(output, max_tokens: int) -> dict:
+    """
+    Compute per-response metrics from a single vLLM CompletionOutput.
+
+    Args:
+        output: vLLM CompletionOutput object (must have logprobs enabled)
+        max_tokens: the max_tokens setting used for generation
+
+    Returns:
+        dict with keys:
+            response_length       – number of generated tokens
+            response_char_length  – character length of generated text
+            is_clipped            – whether generation hit the max_tokens limit
+            mean_logprob          – average log-probability per token
+            sum_logprob           – total log-probability (sequence score)
+            token_entropy_approx  – approximate per-token entropy (= -mean_logprob)
+            min_logprob           – lowest token log-probability
+            max_logprob           – highest token log-probability
+    """
+    n_tokens = len(output.token_ids)
+    char_len = len(output.text)
+    is_clipped = (output.finish_reason != "stop") if output.finish_reason else (n_tokens >= max_tokens)
+
+    # Extract per-token logprobs from vLLM output
+    # output.logprobs is a list of dicts: [{token_id: Logprob, ...}, ...]
+    token_logprobs = []
+    if output.logprobs:
+        for step_dict in output.logprobs:
+            if step_dict:
+                # The sampled token's logprob is the one matching the generated token_id
+                # In vLLM, step_dict maps token_id -> Logprob object with .logprob attribute
+                for tid, logprob_obj in step_dict.items():
+                    # The first key in the dict is the sampled token
+                    token_logprobs.append(logprob_obj.logprob if hasattr(logprob_obj, 'logprob') else logprob_obj)
+                    break  # only take the sampled token
+
+    if token_logprobs:
+        mean_lp = sum(token_logprobs) / len(token_logprobs)
+        sum_lp = sum(token_logprobs)
+        min_lp = min(token_logprobs)
+        max_lp = max(token_logprobs)
+        entropy_approx = -mean_lp  # proxy for per-token entropy
+    else:
+        mean_lp = sum_lp = min_lp = max_lp = entropy_approx = None
+
+    return {
+        "response_length": n_tokens,
+        "response_char_length": char_len,
+        "is_clipped": is_clipped,
+        "mean_logprob": round(mean_lp, 6) if mean_lp is not None else None,
+        "sum_logprob": round(sum_lp, 4) if sum_lp is not None else None,
+        "token_entropy_approx": round(entropy_approx, 6) if entropy_approx is not None else None,
+        "min_logprob": round(min_lp, 6) if min_lp is not None else None,
+        "max_logprob": round(max_lp, 6) if max_lp is not None else None,
+    }
+
 # =====================================================
 # 2. 构造 prompt 的工厂函数
 # =====================================================
@@ -203,6 +259,7 @@ def main(args):
         max_tokens=args.max_tokens,
         seed=args.seed,
         stop=["<|eot_id|>", "</s>", "Q:"],
+        logprobs=1,  # enable per-token logprobs for metrics
     )
 
     # ----------------------------
@@ -268,11 +325,18 @@ def main(args):
                 sc_score = 0.0
             # --- Self-Consistency 计算逻辑结束 ---
 
+            # --- 计算每条回答的 metrics ---
+            response_metrics = [
+                compute_response_metrics(out, args.max_tokens)
+                for out in request_output.outputs
+            ]
+
             record = {
                 "problem": original_item["problem"],
                 "answer": original_item.get("answer", original_item.get("solution", None)),
                 "responses": responses,
                 "extracted_answers": extracted_answers, # 可选：保存所有提取出的答案用于调试
+                "response_metrics": response_metrics,   # 每条回答的详细指标
                 "sc_answer": sc_answer,                 # 最终选定的答案
                 "sc_score": sc_score                    # 自洽性分数 (0.0 - 1.0)
             }
