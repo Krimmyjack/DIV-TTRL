@@ -553,15 +553,11 @@ def compute_pass_grpo_penalized_advantage(
                 var_l = sum((x - mu_l)**2 for x in correct_lengths) / len(correct_lengths)
                 sigma_l = np.sqrt(var_l)
                 
-                # Dynamic Lambda: lam_dynamic = (0.5 * a_pos) / c_max
-                # This ensures diversity reward scales with the difficulty/scarcity of correct answers
-                current_lam_div = (0.5 * a_pos) / (c_max + 1e-10)
-                
                 for local_i, global_i in enumerate(sample_indices):
                     if answers[local_i] == 0:
                         l_i = int(actual_lengths_cpu[global_i])
                         div_val = abs(l_i - mu_l) / (sigma_l + 1e-5)
-                        reward_div = current_lam_div * min(div_val, c_max)
+                        reward_div = lam_div * min(div_val, c_max)
                         group_r_div[local_i] = reward_div
                         
                         if reward_div > 0:
