@@ -574,12 +574,14 @@ def compute_pass_grpo_penalized_advantage(
                 total_a_passk += a_pass_k
                 total_adv_raw += raw_v
                 
-            if N > 1:
+            # Conditional Normalization: Only re-normalize if rewards were added
+            # If not added, raw_v is the raw Pass@k advantage which is already theoretically normalized
+            if N > 1 and sc_ratio > div_sc_threshold:
                 mu_adv = np.mean(group_raw_adv)
                 std_adv = np.std(group_raw_adv, ddof=0)
                 group_final_adv = (group_raw_adv - mu_adv) / (std_adv + epsilon)
             else:
-                group_final_adv = np.zeros_like(group_raw_adv)
+                group_final_adv = group_raw_adv
                 
             for local_i, global_i in enumerate(sample_indices):
                 advantages_raw_np[global_i] = group_final_adv[local_i]
