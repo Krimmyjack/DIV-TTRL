@@ -596,11 +596,16 @@ def compute_pass_grpo_penalized_advantage(
         # Create GPU tensors only once at the end
         advantages_raw_tensor = torch.tensor(advantages_raw_np, dtype=dtype, device=device)
         advantages = advantages_raw_tensor.unsqueeze(-1) * response_mask
-        returns = advantages  # outcome-based: returns == advantages, no need to clone
+        returns = advantages.clone()  # outcome-based: returns == advantages, ensure independent tensors
 
-        # explicitly free cpu numpy caches to cut the potential ties with python GC that delays GPU free
+        # [FIX #2] Explicit GPU memory cleanup to prevent fragmentation
+        # When response_length is large (4096+), intermediate tensors can consume significant memory
         del actual_lengths_cpu
         del advantages_raw_np
+        del advantages_raw_tensor  # Explicitly delete intermediate GPU tensor
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Force cache cleanup to free reserved but unallocated memory
         
     return advantages, returns, metrics
 

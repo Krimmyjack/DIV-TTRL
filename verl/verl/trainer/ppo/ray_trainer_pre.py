@@ -86,7 +86,6 @@ class AdvantageEstimator(str, Enum):
     PASS_GRPO = "pass_grpo"
     SELECTIVE_PASSK = "selective_passk"
     ADAPTIVE_PASSK = "adaptive_passk"
-    PASS_GRPO_PENALIZED = "pass_grpo_penalized"
 
 
 @dataclass
@@ -633,48 +632,6 @@ def compute_advantage(
             nonzero_mask = advantages.abs().sum(dim=-1) > 0
             if nonzero_mask.any():
                 data.meta_info["adaptive_passk/avg_advantage"] = advantages[nonzero_mask].mean().item()
-    elif adv_estimator == AdvantageEstimator.PASS_GRPO_PENALIZED:
-        if diversity_density_config is None:
-            diversity_density_config = {}
-        
-        k = diversity_density_config.get("k", 4)
-        epsilon = diversity_density_config.get("epsilon", 1e-6)
-        
-        if "answer_types" not in data.non_tensor_batch:
-            raise ValueError("PASS_GRPO_PENALIZED requires 'answer_types' in data.non_tensor_batch")
-        
-        consistency_rates = data.non_tensor_batch.get("consistency_rate", None)
-        if consistency_rates is None:
-            raise ValueError("PASS_GRPO_PENALIZED requires 'consistency_rate' in data.non_tensor_batch")
-            
-        advantages, returns, metrics = core_algos.compute_pass_grpo_penalized_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
-            response_mask=data.batch["response_mask"],
-            index=data.non_tensor_batch["uid"],
-            answer_types=data.non_tensor_batch["answer_types"],
-            consistency_rates=consistency_rates,
-            diversity_density_config=diversity_density_config,
-            k=k,
-            epsilon=epsilon
-        )
-        data.batch["advantages"] = advantages
-        data.batch["returns"] = returns
-        
-        # Log metrics to meta_info (only scalar values to avoid tensor memory leak)
-        for k_met, v_met in metrics.items():
-            if isinstance(v_met, (int, float)):
-                data.meta_info[k_met] = v_met
-            elif isinstance(v_met, torch.Tensor) and v_met.numel() == 1:
-                # Only store scalar tensors, convert to Python float
-                data.meta_info[k_met] = float(v_met.item())
-            # Skip other tensor types to avoid memory leaks
-        
-        # Explicitly delete metrics dict to free memory
-        del metrics
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        data.meta_info["pass_grpo_penalized/avg_total_advantage"] = advantages.mean().item()
     else:
         raise NotImplementedError
     return data
@@ -746,7 +703,6 @@ class RayPPOTrainer:
             AdvantageEstimator.PASS_GRPO,
             AdvantageEstimator.SELECTIVE_PASSK,
             AdvantageEstimator.ADAPTIVE_PASSK,
-            AdvantageEstimator.PASS_GRPO_PENALIZED,
         ]:
             self.use_critic = False
         else:
@@ -1106,15 +1062,6 @@ class RayPPOTrainer:
         if self.use_ttrl and "ttrl_info" in result:
             for key, val in result["ttrl_info"].items():
                 metric_dict[f"val-ttrl/{key}"] = val
-
-        # Clean up memory explicitly to prevent OOM in subsequent generation
-        import gc
-        del test_batch, test_gen_batch, test_gen_batch_padded, test_output_gen_batch
-        del input_ids, output_ids
-        gc.collect()
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         return metric_dict
 
@@ -1527,11 +1474,8 @@ class RayPPOTrainer:
 
                         batch.batch["token_level_scores"] = reward_tensor
 
-                        # Note: balance_batch already called once at line 1427
-                        # Skip the second balance_batch in TTRL mode to avoid redundant sorting
-                        # which causes OOM with large batch sizes (80x samples)
-                        # if self.use_ttrl:
-                        #     self._balance_batch(batch, metrics=metrics)
+                        if self.use_ttrl:
+                            self._balance_batch(batch, metrics=metrics)
 
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:
@@ -1555,10 +1499,9 @@ class RayPPOTrainer:
                             AdvantageEstimator.PASS_GRPO,
                             AdvantageEstimator.SELECTIVE_PASSK,
                             AdvantageEstimator.ADAPTIVE_PASSK,
-                            AdvantageEstimator.PASS_GRPO_PENALIZED,
                         ]:
                             diversity_density_config = {
-                                "k": getattr(self.config.algorithm, "diversity_density_k", 4),
+                                "k": getattr(self.config.algorithm, "diversity_density_k", 8),
                                 "fallback_estimator": getattr(
                                     self.config.algorithm, "diversity_density_fallback", "grpo"
                                 ),
@@ -1571,14 +1514,6 @@ class RayPPOTrainer:
                                 "selective_passk_threshold": getattr(
                                     self.config.algorithm, "selective_passk_threshold", 0.5
                                 ),
-                                "lam_div": getattr(self.config.algorithm, "lam_div", 0.05),
-                                "c_max": getattr(self.config.algorithm, "c_max", 2.0),
-                                "tau_rep": getattr(self.config.algorithm, "tau_rep", 0.2),
-                                "gamma": getattr(self.config.algorithm, "gamma", 1.0),
-                                "p_max": getattr(self.config.algorithm, "p_max", 0.15),
-                                "n_gram_size": getattr(self.config.algorithm, "n_gram_size", 3),
-                                "use_rep_penalty": getattr(self.config.algorithm, "use_rep_penalty", False),
-                                "div_sc_threshold": getattr(self.config.algorithm, "div_sc_threshold", 0.5),
                             }
                         
                         batch = compute_advantage(
@@ -1683,29 +1618,6 @@ class RayPPOTrainer:
                             if ap_key in batch.meta_info:
                                 metrics[f"train/{ap_key.replace('/', '_')}"] = float(batch.meta_info[ap_key])
 
-                        # Log bootstrap_passk metrics if available
-                        for bp_key in [
-                            "bootstrap_passk/num_low_prompts",
-                            "bootstrap_passk/num_high_prompts",
-                            "bootstrap_passk/low_ratio",
-                            "bootstrap_passk/avg_low_advantage",
-                            "bootstrap_passk/avg_high_advantage",
-                            "bootstrap_passk/avg_total_advantage",
-                        ]:
-                            if bp_key in batch.meta_info:
-                                metrics[f"train/{bp_key.replace('/', '_')}"] = float(batch.meta_info[bp_key])
-                                
-                        # Log pass_grpo_penalized metrics if available
-                        for pp_key in [
-                            "pass_grpo_penalized/avg_r_div",
-                            "pass_grpo_penalized/r_div_triggered_ratio",
-                            "pass_grpo_penalized/avg_raw_a_passk",
-                            "pass_grpo_penalized/avg_adv_raw",
-                            "pass_grpo_penalized/avg_total_advantage",
-                        ]:
-                            if pp_key in batch.meta_info:
-                                metrics[f"train/{pp_key.replace('/', '_')}"] = float(batch.meta_info[pp_key])
-
                     # update critic
                     if self.use_critic:
                         with _timer("update_critic", timing_raw):
@@ -1748,19 +1660,6 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
-
-                # Explicitly free batch and metrics from this step to prevent memory leaks from python's delayed GC
-                del batch, batch_dict, metrics, timing_raw
-                if 'gen_batch' in locals():
-                    del gen_batch
-                if 'gen_batch_output' in locals():
-                    del gen_batch_output
-                import gc
-                gc.collect()
-                
-                # Force GPU cache cleanup to prevent accumulation of unused tensors
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
