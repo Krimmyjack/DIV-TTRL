@@ -485,7 +485,8 @@ def compute_pass_grpo_penalized_advantage(
     device = token_level_rewards.device
     dtype = token_level_rewards.dtype
     
-    lam_div = diversity_density_config.get("lam_div", 0.2)
+    lam_long = diversity_density_config.get("lam_long", 0.02)
+    lam_short = diversity_density_config.get("lam_short", 0.05)
     c_max = diversity_density_config.get("c_max", 2.0)
     div_sc_threshold = diversity_density_config.get("div_sc_threshold", 0.3)
     
@@ -557,7 +558,9 @@ def compute_pass_grpo_penalized_advantage(
                     if answers[local_i] == 0:
                         l_i = int(actual_lengths_cpu[global_i])
                         div_val = abs(l_i - mu_l) / (sigma_l + 1e-5)
-                        reward_div = lam_div * min(div_val, c_max)
+                        # Asymmetric lambda: shorter answers get stronger diversity bonus
+                        current_lam = lam_short if l_i < mu_l else lam_long
+                        reward_div = current_lam * min(div_val, c_max)
                         group_r_div[local_i] = reward_div
                         
                         if reward_div > 0:

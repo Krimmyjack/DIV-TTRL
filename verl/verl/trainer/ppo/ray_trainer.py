@@ -1571,7 +1571,8 @@ class RayPPOTrainer:
                                 "selective_passk_threshold": getattr(
                                     self.config.algorithm, "selective_passk_threshold", 0.5
                                 ),
-                                "lam_div": getattr(self.config.algorithm, "lam_div", 0.05),
+                                "lam_long": getattr(self.config.algorithm, "lam_long", 0.02),
+                                "lam_short": getattr(self.config.algorithm, "lam_short", 0.05),
                                 "c_max": getattr(self.config.algorithm, "c_max", 2.0),
                                 "tau_rep": getattr(self.config.algorithm, "tau_rep", 0.2),
                                 "gamma": getattr(self.config.algorithm, "gamma", 1.0),
