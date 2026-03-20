@@ -108,6 +108,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "response_length/mean": torch.mean(response_length).detach().item(),
         "response_length/max": torch.max(response_length).detach().item(),
         "response_length/min": torch.min(response_length).detach().item(),
+        "response_length/std": torch.std(response_length.float()).detach().item(),
         "response_length/clip_ratio": torch.mean(torch.eq(response_length, max_response_length).float())
         .detach()
         .item(),
