@@ -485,7 +485,7 @@ def compute_pass_grpo_penalized_advantage(
     device = token_level_rewards.device
     dtype = token_level_rewards.dtype
     
-    lam_div = diversity_density_config.get("lam_div", 0.2)
+    lam_div = diversity_density_config.get("lam_div", 0.05)
     c_max = diversity_density_config.get("c_max", 2.0)
     div_sc_threshold = diversity_density_config.get("div_sc_threshold", 0.3)
     

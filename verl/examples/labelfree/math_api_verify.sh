@@ -3,9 +3,9 @@
 ENABLE_NGRAM_PENALTY=False bash examples/labelfree/math_api_verify.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
     --backend fsdp \
-    --local_dir /data/home/jianfeng/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/164436/global_step_60/actor \
-    --hf_model_path /data/home/jianfeng/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
-    --target_dir /data/home/jianfeng/model/math_step_60_len_div
+    --local_dir /root/autodl-tmp/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/114540/global_step_30/actor \
+    --hf_model_path /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
+    --target_dir /root/autodl-tmp/model/math_step_30_len_div
 """
 export WANDB_ENTITY=2691454060-ucla
 
@@ -150,8 +150,8 @@ echo "========================="
 # ------------------------------------------------------------
 
 DATE=$(date +%m%d)
-# TIME_TAG=$(date +%H%M%S)
-TIME_TAG=164436
+TIME_TAG=$(date +%H%M%S)
+# TIME_TAG=114540
 
 ADVANTAGE="pass_grpo_penalized"
 
@@ -176,7 +176,7 @@ fi
 
 # Set EPISODE
 EPISODE=4
-DATA_TRAIN_BATCH_SIZE=8
+DATA_TRAIN_BATCH_SIZE=16
 N_VOTES_PER_PROMPT=64 # Reduce candidates to balance computational overhead
 N_SAMPLES_PER_PROMPT=32 # Keep training sample count
 MINI_BATCH_SIZE=1 # Actual mini batch size is MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT - increase mini batch
@@ -247,7 +247,7 @@ EXPERIMENT="${EXPERIMENT}-Ent${ENTROPY_COEFF}"
 
 
 LOG_NAME="${EXPERIMENT}-${MODEL}"
-OUTPUT_DIR="/data/home/jianfeng/model/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}/${TIME_TAG}"
+OUTPUT_DIR="/root/autodl-tmp/model/${WANDB_PROJECT}/${MODEL}/${EXPERIMENT}/${TIME_TAG}"
 
 
 
@@ -308,7 +308,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
   actor_rollout_ref.rollout.do_vote=True \
   actor_rollout_ref.rollout.n_vote=$N_VOTES_PER_PROMPT \
   actor_rollout_ref.rollout.n=$N_SAMPLES_PER_PROMPT \
@@ -333,12 +333,12 @@ python -m verl.trainer.main_ppo \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
-  trainer.n_gpus_per_node=4 \
+  trainer.n_gpus_per_node=8 \
   trainer.nnodes=1 \
-  trainer.save_freq=30 \
+  trainer.save_freq=15 \
   trainer.test_freq=5 \
-  trainer.max_actor_ckpt_to_keep=1 \
-  trainer.max_critic_ckpt_to_keep=1 \
+  trainer.max_actor_ckpt_to_keep=0 \
+  trainer.max_critic_ckpt_to_keep=0 \
   trainer.default_local_dir=$OUTPUT_DIR \
   trainer.total_epochs=$EPISODE "$@"
 
