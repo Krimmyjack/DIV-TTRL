@@ -126,14 +126,6 @@ def main_task(config, compute_score=None):
         from verl.workers.reward_manager import TTRLRewardManager
 
         reward_manager_cls = TTRLRewardManager
-    elif reward_manager_name == "semantic_ttrl":
-        from verl.workers.reward_manager import SemanticTTRLRewardManager
-
-        reward_manager_cls = SemanticTTRLRewardManager
-    elif reward_manager_name == "cluster_semantic_ttrl":
-        from verl.workers.reward_manager import ClusterSemanticTTRLRewardManager
-
-        reward_manager_cls = ClusterSemanticTTRLRewardManager
     else:
         raise NotImplementedError
 

@@ -258,14 +258,14 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Experiment name: $LOG_NAME"
 echo "==============================="
 
-  # reward_model.reward_manager=diversity_ttrl \
+  # reward_model.reward_manager=ttrl \
   # reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   # reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   # reward_model.reward_kwargs.mode="train" \
 
 # # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
-  reward_model.reward_manager=diversity_ttrl \
+  reward_model.reward_manager=ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   reward_model.reward_kwargs.mode="train" \

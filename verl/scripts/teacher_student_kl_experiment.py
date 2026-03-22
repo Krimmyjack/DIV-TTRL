@@ -238,7 +238,10 @@ def main(args):
     llm = LLM(
         model=args.model_path,
         tokenizer=args.model_path,
-        tensor_parallel_size=torch.cuda.device_count() or 1,
+        tensor_parallel_size=args.tensor_parallel_size,
+        max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        enforce_eager=args.enforce_eager,
         trust_remote_code=True,
         dtype="auto",
     )
@@ -310,7 +313,7 @@ def main(args):
 
     # Aggregate results
     # problem_idx -> list of dicts: {rollout_idx, kl_sum, kl_mean, ans_norm}
-    scored_data = {item["idx"]: [] for item in data if item.get("sc_score", 1.0) < 0.3}
+    scored_data = {idx: [] for idx, item in enumerate(data) if item.get("sc_score", 1.0) < 0.3}
 
     for i, output in enumerate(outputs):
         meta = metadata_map[i]
@@ -404,5 +407,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True, help="HuggingFace model path")
     parser.add_argument("--input_file", type=str, default="scripts/base.jsonl", help="Input JSONL")
     parser.add_argument("--output_file", type=str, default="scripts/kl_penalty_results.jsonl", help="Output JSONL")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="vLLM tensor parallel size")
+    parser.add_argument("--max_model_len", type=int, default=4096, help="Max context length to restrict KV cache size")
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.7, help="Fraction of GPU memory for vLLM")
+    parser.add_argument("--enforce_eager", action="store_true", help="Disable CUDA graphs (saves some memory)")
     args = parser.parse_args()
     main(args)

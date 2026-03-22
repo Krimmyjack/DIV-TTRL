@@ -136,296 +136,32 @@ def _log_comb(n: np.ndarray, k: np.ndarray) -> np.ndarray:
     return result
 
 
-def _prob_not_in_group(N: int, s_i: int, k: int) -> float:
-    """
-    Compute P(u_i not in G) = C(N - s_i, k) / C(N, k).
-    
-    Uses product form for numerical stability(stable way for k):
-    P = prod_{j=0}^{k-1} (N - s_i - j) / (N - j)
-    
-    Args:
-        N: Total number of samples
-        s_i: Count of answer type i
-        k: Group size
-    
-    Returns:
-        Probability that answer type i is not in a random group of size k
-    """
-    if s_i >= N or k > N - s_i:
-        return 0.0
-    
-    log_prob = 0.0
-    for j in range(k):
-        if N - j <= 0:
-            return 0.0
-        log_prob += np.log(max(N - s_i - j, 1e-10)) - np.log(N - j)
-    
-    return np.exp(log_prob)
 
-
-def _prob_not_in_group_vectorized(N: int, s_arr: np.ndarray, k: int) -> np.ndarray:
+def _compute_passk_probs(N: int, c_neg: int, k: int, epsilon: float = 1e-6) -> tuple[float, float]:
+    """Helper function to compute pass@k advantage scores.
+    Returns: (a_pos, a_neg)
     """
-    Vectorized version: compute P(u_i not in G) for all answer types.
+    log_prob_fail = _log_comb(np.array([c_neg]), np.array([k]))[0] - _log_comb(np.array([N]), np.array([k]))[0]
+    prob_fail = np.exp(log_prob_fail) if np.isfinite(log_prob_fail) else 0.0
+    prob_fail = np.clip(prob_fail, 0.0, 1.0)
+    r_mean = 1.0 - prob_fail
     
-    P(u_i not in G) = C(N - s_i, k) / C(N, k)
+    variance = r_mean * (1.0 - r_mean)
+    std = np.sqrt(variance)
     
-    Args:
-        N: Total number of samples
-        s_arr: Array of counts for each answer type [s_1, s_2, ..., s_D]
-        k: Group size
-    
-    Returns:
-        Array of probabilities for each answer type
-    """
-    # Use log-space for numerical stability
-    log_comb_N_k = _log_comb(np.array([N]), np.array([k]))[0]
-    log_comb_N_minus_s_k = _log_comb(N - s_arr, np.full_like(s_arr, k))
-    
-    log_probs = log_comb_N_minus_s_k - log_comb_N_k
-    
-    # Convert back to probability, handle -inf
-    probs = np.where(np.isfinite(log_probs), np.exp(log_probs), 0.0)
-    
-    return probs
-
-
-def _prob_not_in_group_excluding_one(N: int, s_j: int, k: int) -> float:
-    """
-    Compute P(u_j not in G | x in G where x belongs to type t).
-    
-    This is C(N - 1 - s_j, k - 1) / C(N - 1, k - 1) for j != t.
-    
-    Essentially, we remove one sample (x) from the pool, so N -> N-1, k -> k-1.
-    
-    Args:
-        N: Original total number of samples
-        s_j: Count of answer type j (j != t)
-        k: Original group size
-    
-    Returns:
-        Conditional probability
-    """
-    new_N = N - 1
-    new_k = k - 1
-    
-    if new_k <= 0:
-        return 1.0  # No other samples in group
-    
-    if s_j >= new_N or new_k > new_N - s_j:
-        return 0.0
-    
-    log_prob = 0.0
-    for j in range(new_k):
-        if new_N - j <= 0:
-            return 0.0
-        log_prob += np.log(max(new_N - s_j - j, 1e-10)) - np.log(new_N - j)
-    
-    return np.exp(log_prob)
-
-
-def compute_diversity_density_advantage(
-    answer_counts: Dict[int, int],
-    sample_answer_types: List[int],
-    k: int,
-    response_mask: torch.Tensor,
-    epsilon: float = 1e-6
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute diversity density advantage based on hypergeometric distribution.
-    
-    Mathematical formulation:
-    - R = m/k where m is the number of unique answers in a random group of size k
-    - μ = (1/k) * Σᵢ (1 - C(N-sᵢ,k)/C(N,k))  [global mean reward]
-    - R(x) = (1/k) * [1 + Σⱼ≠ₜ (1 - C(N-1-sⱼ,k-1)/C(N-1,k-1))]  [conditional expected reward]
-    - σ² = Var[R]  [computed analytically]
-    - Â(x) = (R(x) - μ) / σ  [normalized advantage]
-    
-    Args:
-        answer_counts: Dict mapping answer_id -> count {a₁: s₁, a₂: s₂, ...}
-        sample_answer_types: List of answer type for each sample [t₁, t₂, ...]
-        k: Group size (typically n_votes_per_prompt)
-        response_mask: Shape (bs, response_length)
-        epsilon: Small value for numerical stability
-    
-    Returns:
-        advantages: (torch.Tensor) shape (bs, response_length)
-        returns: (torch.Tensor) shape (bs, response_length)
-    """
-    # Convert answer_counts to arrays
-    unique_answers = sorted(answer_counts.keys())
-    D = len(unique_answers)  # Number of unique answer types
-    
-    if D == 0:
-        # No valid answers, return zero advantages
-        bs, response_length = response_mask.shape
-        return torch.zeros_like(response_mask, dtype=torch.float32), torch.zeros_like(response_mask, dtype=torch.float32)
-    
-    answer_to_idx = {a: i for i, a in enumerate(unique_answers)}
-    s_arr = np.array([answer_counts[a] for a in unique_answers], dtype=np.float64)
-    N = int(s_arr.sum())  # Total number of samples
-    
-    # Clamp k to be valid
-    k = min(k, N)
-    
-    if k <= 0 or N <= 0:
-        bs, response_length = response_mask.shape
-        return torch.zeros_like(response_mask, dtype=torch.float32), torch.zeros_like(response_mask, dtype=torch.float32)
-    
-    # ==== Step 1: Compute global mean μ ====
-    # μ = (1/k) * Σᵢ (1 - P(uᵢ not in G))
-    # P(uᵢ not in G) = C(N - sᵢ, k) / C(N, k)
-    
-    p_not_in_group = _prob_not_in_group_vectorized(N, s_arr, k)  # Shape: (D,)
-    p_in_group = 1.0 - p_not_in_group
-    global_mean = np.sum(p_in_group) / k  # μ
-    
-    # ==== Step 2: Compute conditional expected reward R(x) for each sample ====
-    # For a sample x belonging to answer type t:
-    # R(x) = (1/k) * [1 + Σⱼ≠ₜ (1 - P(uⱼ not in G | x in G))]
-    # P(uⱼ not in G | x in G) = C(N-1-sⱼ, k-1) / C(N-1, k-1)
-    
-    bs = len(sample_answer_types)
-    conditional_rewards = np.zeros(bs, dtype=np.float64)
-    
-    new_N = N - 1
-    new_k = k - 1
-    
-    # Precompute P(uⱼ not in G | x in G) for all answer types j (assuming x is from type t)
-    # Note: For type t itself, we need special handling
-    
-    if new_k > 0:
-        # For j != t: P = C(N-1-sⱼ, k-1) / C(N-1, k-1)
-        p_not_in_group_cond = _prob_not_in_group_vectorized(new_N, s_arr, new_k)
+    if std < epsilon:
+        return 0.0, 0.0
+        
+    a_pos = prob_fail / std
+    if c_neg >= 1:
+        log_p_cond_fail = _log_comb(np.array([c_neg - 1]), np.array([k - 1]))[0] - _log_comb(np.array([N - 1]), np.array([k - 1]))[0]
+        p_cond_fail = np.exp(log_p_cond_fail) if np.isfinite(log_p_cond_fail) else 0.0
+        p_cond_fail = np.clip(p_cond_fail, 0.0, 1.0)
     else:
-        # k=1, only x in group, so only type t contributes
-        p_not_in_group_cond = np.ones(D, dtype=np.float64)
+        p_cond_fail = 0.0
+    a_neg = (prob_fail - p_cond_fail) / std
     
-    for i, t in enumerate(sample_answer_types):
-        if t not in answer_to_idx:
-            # Unknown answer type, use global mean
-            conditional_rewards[i] = global_mean
-            continue
-        
-        t_idx = answer_to_idx[t]
-        
-        # Type t is guaranteed in group (count 1 from x)
-        # For j != t: use precomputed probabilities
-        # For j == t: we need to adjust since one sample of type t is already taken
-        
-        # The contribution from type t is always 1/k (x itself)
-        # For other types j != t: contribute (1 - P(uⱼ not in G | x in G)) / k
-        
-        if new_k > 0:
-            # For type t: P(another sample of type t in remaining k-1) 
-            # = C(N-1-(sₜ-1), k-1) / C(N-1, k-1)
-            # Note: s_arr[t_idx] - 1 because one sample is already x
-            s_t_remaining = s_arr[t_idx] - 1
-            if s_t_remaining >= 0:
-                p_t_not_in_remaining = _prob_not_in_group_vectorized(
-                    new_N, np.array([s_t_remaining]), new_k
-                )[0]
-            else:
-                p_t_not_in_remaining = 1.0  # No other samples of type t
-            
-            # Sum contributions from all types
-            # Type t: 1/k (guaranteed) + (1 - p_t_not_in_remaining)/k * 0 (already counted)
-            # Actually, the formula is:
-            # R(x) = (1/k) * [1 + Σⱼ≠ₜ (1 - P(uⱼ not in G | x in G))]
-            
-            sum_contrib = 1.0  # Type t is guaranteed to contribute 1
-            for j_idx in range(D):
-                if j_idx != t_idx:
-                    sum_contrib += (1.0 - p_not_in_group_cond[j_idx])
-            
-            conditional_rewards[i] = sum_contrib / k
-        else:
-            # k=1, only x in group
-            conditional_rewards[i] = 1.0  # R(x) = 1/1 = 1
-    
-    # ==== Step 3: Compute variance for normalization ====
-    # Approximate variance using the formula for sampling without replacement
-    # For simplicity, use empirical variance of conditional rewards
-    variance = np.var(conditional_rewards)
-    std = np.sqrt(variance + epsilon)
-    
-    # ==== Step 4: Compute normalized advantage ====
-    # Â(x) = (R(x) - μ) / σ
-    advantages_np = (conditional_rewards - global_mean) / std
-    
-    # ==== Step 5: Expand to token level ====
-    response_length = response_mask.shape[1]
-    
-    # Convert to torch and expand
-    advantages = torch.tensor(advantages_np, dtype=response_mask.dtype, device=response_mask.device)
-    advantages = advantages.unsqueeze(-1) * response_mask  # (bs, response_length)
-    
-    returns = advantages.clone()  # For outcome-based, returns = advantages
-    
-    return advantages, returns
-
-
-def compute_diversity_density_advantage_from_prompts(
-    token_level_rewards: torch.Tensor,
-    response_mask: torch.Tensor,
-    index: np.ndarray,
-    answer_types: np.ndarray,
-    k: int,
-    epsilon: float = 1e-6
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute diversity density advantage per prompt group.
-    
-    This is the interface function that matches other compute_*_outcome_advantage functions.
-    
-    Args:
-        token_level_rewards: (torch.Tensor) shape (bs, response_length) - used for device/dtype
-        response_mask: (torch.Tensor) shape (bs, response_length)
-        index: (np.ndarray) prompt indices for each sample
-        answer_types: (np.ndarray) answer type/id for each sample
-        k: Group size (typically n_votes_per_prompt)
-        epsilon: Small value for numerical stability
-    
-    Returns:
-        advantages: (torch.Tensor) shape (bs, response_length)
-        returns: (torch.Tensor) shape (bs, response_length)
-    """
-    bs, response_length = token_level_rewards.shape
-    device = token_level_rewards.device
-    dtype = token_level_rewards.dtype
-    
-    # Group samples by prompt
-    prompt_to_samples = defaultdict(list)
-    for i in range(bs):
-        prompt_to_samples[index[i]].append(i)
-    
-    # Initialize advantages
-    advantages = torch.zeros(bs, response_length, dtype=dtype, device=device)
-    # split by prompt and compute advantage per prompt
-    for prompt_idx, sample_indices in prompt_to_samples.items():
-        # Collect answer types for this prompt
-        prompt_answer_types = [answer_types[i] for i in sample_indices]
-        
-        # Count answer occurrences
-        answer_counts = defaultdict(int)
-        for at in prompt_answer_types:
-            answer_counts[at] += 1
-        
-        # Compute advantages for this prompt group
-        prompt_response_mask = response_mask[sample_indices]
-        prompt_adv, _ = compute_diversity_density_advantage(
-            answer_counts=dict(answer_counts),
-            sample_answer_types=prompt_answer_types,
-            k=k,
-            response_mask=prompt_response_mask,
-            epsilon=epsilon
-        )
-        
-        # Assign back to global advantages
-        for local_i, global_i in enumerate(sample_indices):
-            advantages[global_i] = prompt_adv[local_i]
-    
-    return advantages, advantages.clone()
-
+    return float(a_pos), float(a_neg)
 
 def compute_pass_grpo_advantage(
     token_level_rewards: torch.Tensor,
@@ -435,32 +171,10 @@ def compute_pass_grpo_advantage(
     k: int,
     epsilon: float = 1e-6
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute pass@k advantage using the correct mathematical formulation.
-    
-    References:
-    - Group Mean Reward (R_bar): Eq. 11
-    - Group Std (sigma): Eq. 12
-    - Positive Advantage (A_pos): Eq. 14
-    - Negative Advantage (A_neg): Eq. 15
-    
-    Args:
-        token_level_rewards: (torch.Tensor) shape (bs, response_length)
-        response_mask: (torch.Tensor) shape (bs, response_length)
-        index: (np.ndarray) prompt indices for each sample
-        answer_types: (np.ndarray) answer type/id for each sample (0 is correct)
-        k: Group size
-        epsilon: Small value for numerical stability
-    
-    Returns:
-        advantages: (torch.Tensor) shape (bs, response_length)
-        returns: (torch.Tensor) same as advantages
-    """
     bs, response_length = token_level_rewards.shape
     device = token_level_rewards.device
     dtype = token_level_rewards.dtype
     
-    # Group samples by prompt
     prompt_to_samples = defaultdict(list)
     prompt_to_answers = defaultdict(list)
     
@@ -469,70 +183,26 @@ def compute_pass_grpo_advantage(
         prompt_to_samples[prompt_idx].append(i)
         prompt_to_answers[prompt_idx].append(answer_types[i])
     
-    # Initialize advantages
     advantages = torch.zeros(bs, 1, dtype=dtype, device=device)
     
     for prompt_idx, sample_indices in prompt_to_samples.items():
         N = len(sample_indices)
         answers = prompt_to_answers[prompt_idx]
         
-        # Count outcomes
-        # Assume 0 is the correct answer type
         c_maj = sum(1 for a in answers if a == 0)
         c_neg = N - c_maj
         
-        # 1. Compute Group Mean Reward (Prob of at least one correct in k samples)
-        # R_mean = 1 - C(N_neg, k) / C(N, k)
-        # Use log-space for stability: log(P_fail) = log_comb(N_neg, k) - log_comb(N, k)
-        log_prob_fail = _log_comb(np.array([c_neg]), np.array([k]))[0] - \
-                        _log_comb(np.array([N]), np.array([k]))[0]
-        
-        prob_fail = np.exp(log_prob_fail) if np.isfinite(log_prob_fail) else 0.0
-        prob_fail = np.clip(prob_fail, 0.0, 1.0)
-        r_mean = 1.0 - prob_fail
-        
-        # 2. Compute Group Standard Deviation
-        variance = r_mean * (1.0 - r_mean)
-        std = np.sqrt(variance)
-        
-        if std < epsilon:
-            # Deterministic outcome (always pass or always fail) -> 0 advantage
-            a_pos = 0.0
-            a_neg = 0.0
-        else:
-            # 3. Positive Advantage (Eq. 14)
-            # A_pos = (1 - R_mean) / sigma = P_fail / sigma
-            a_pos = prob_fail / std
+        a_pos, a_neg = _compute_passk_probs(N, c_neg, k, epsilon)
             
-            # 4. Negative Advantage (Eq. 15)
-            # A_neg = ( (1 - R_mean) - P_cond ) / sigma
-            # P_cond = C(N_neg - 1, k - 1) / C(N - 1, k - 1) (Prob failure given we picked a negative)
-            
-            if c_neg >= 1:
-                log_p_cond_fail = _log_comb(np.array([c_neg - 1]), np.array([k - 1]))[0] - \
-                                  _log_comb(np.array([N - 1]), np.array([k - 1]))[0]
-                p_cond_fail = np.exp(log_p_cond_fail) if np.isfinite(log_p_cond_fail) else 0.0
-                p_cond_fail = np.clip(p_cond_fail, 0.0, 1.0)
-            else:
-                p_cond_fail = 0.0 # Should not happen if we are assigning to a negative sample
-            
-            # A_neg = (P_fail - P_cond_fail) / sigma
-            a_neg = (prob_fail - p_cond_fail) / std
-            
-        # Assign advantages based on correctness
-        # We need to map back to the original indices
-        
         for local_i, global_i in enumerate(sample_indices):
             is_correct = (answers[local_i] == 0)
             val = a_pos if is_correct else a_neg
             advantages[global_i] = val
             
-    # Expand to response length and mask
     advantages = advantages * response_mask
     returns = advantages.clone()
     
     return advantages, returns
-
 
 def compute_pass_grpo_penalized_advantage(
     token_level_rewards: torch.Tensor,
@@ -544,17 +214,6 @@ def compute_pass_grpo_penalized_advantage(
     k: int,
     epsilon: float = 1e-6
 ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
-    """
-    Compute pass_grpo advantage with length diversity reward.
-    
-    All intermediate computation is done on CPU/numpy to avoid CUDA memory
-    fragmentation from many small GPU tensor allocations in loops.
-    Only the final advantage tensor is created on GPU.
-    
-    Components:
-    - A_pass@k: pass@k-based advantage (combinatorial)
-    - R_div: dynamic length diversity reward for correct answers when sc > threshold
-    """
     bs, response_length = token_level_rewards.shape
     device = token_level_rewards.device
     dtype = token_level_rewards.dtype
@@ -574,13 +233,9 @@ def compute_pass_grpo_penalized_advantage(
             prompt_to_answers[prompt_idx].append(answer_types[i])
             prompt_to_consistency[prompt_idx] = consistency_rates[i]
         
-        # Move actual_lengths to CPU once, avoid per-item .item() GPU sync in loop
-        actual_lengths_cpu = response_mask.sum(dim=-1).long().cpu().numpy()  # (bs,)
-        
-        # All intermediate computation on CPU/numpy
+        actual_lengths_cpu = response_mask.sum(dim=-1).long().cpu().numpy()
         advantages_raw_np = np.zeros(bs, dtype=np.float64)
         
-        # === Logging accumulators ===
         total_r_div = 0.0
         r_div_count = 0
         total_adv_raw = 0.0
@@ -594,26 +249,8 @@ def compute_pass_grpo_penalized_advantage(
             c_maj = sum(1 for a in answers if a == 0)
             c_neg = N - c_maj
             
-            log_prob_fail = _log_comb(np.array([c_neg]), np.array([k]))[0] - _log_comb(np.array([N]), np.array([k]))[0]
-            prob_fail = np.exp(log_prob_fail) if np.isfinite(log_prob_fail) else 0.0
-            prob_fail = np.clip(prob_fail, 0.0, 1.0)
-            r_mean = 1.0 - prob_fail
-            variance = r_mean * (1.0 - r_mean)
-            std = np.sqrt(variance)
+            a_pos, a_neg = _compute_passk_probs(N, c_neg, k, epsilon)
             
-            if std < epsilon:
-                a_pos, a_neg = 0.0, 0.0
-            else:
-                a_pos = prob_fail / std
-                if c_neg >= 1:
-                    log_p_cond_fail = _log_comb(np.array([c_neg - 1]), np.array([k - 1]))[0] - _log_comb(np.array([N - 1]), np.array([k - 1]))[0]
-                    p_cond_fail = np.exp(log_p_cond_fail) if np.isfinite(log_p_cond_fail) else 0.0
-                    p_cond_fail = np.clip(p_cond_fail, 0.0, 1.0)
-                else:
-                    p_cond_fail = 0.0
-                a_neg = (prob_fail - p_cond_fail) / std
-            
-            # All group-level computation on CPU with numpy
             group_raw_adv = np.zeros(N, dtype=np.float64)
             group_r_div = np.zeros(N, dtype=np.float64)
             
@@ -645,16 +282,12 @@ def compute_pass_grpo_penalized_advantage(
     
             for local_i, global_i in enumerate(sample_indices):
                 a_pass_k = a_pos if answers[local_i] == 0 else a_neg
-                
-                # raw_adv_i = A_pass@k + R_div
                 raw_v = a_pass_k + group_r_div[local_i]
                 group_raw_adv[local_i] = raw_v
                 
                 total_a_passk += a_pass_k
                 total_adv_raw += raw_v
                 
-            # Conditional Normalization: Only re-normalize if rewards were added
-            # If not added, raw_v is the raw Pass@k advantage which is already theoretically normalized
             if N > 1 and sc_ratio > div_sc_threshold:
                 mu_adv = np.mean(group_raw_adv)
                 std_adv = np.std(group_raw_adv, ddof=0)
@@ -672,108 +305,20 @@ def compute_pass_grpo_penalized_advantage(
             "pass_grpo_penalized/avg_adv_raw": total_adv_raw / bs if bs > 0 else 0.0,
         }
     
-        # Create GPU tensors only once at the end
         advantages_raw_tensor = torch.tensor(advantages_raw_np, dtype=dtype, device=device)
         advantages = advantages_raw_tensor.unsqueeze(-1) * response_mask
-        returns = advantages.clone()  # outcome-based: returns == advantages, ensure independent tensors
-
-        # [FIX #2] Explicit GPU memory cleanup to prevent fragmentation
-        # When response_length is large (4096+), intermediate tensors can consume significant memory
+        returns = advantages.clone()
+        
         del actual_lengths_cpu
         del advantages_raw_np
-        del advantages_raw_tensor  # Explicitly delete intermediate GPU tensor
+        del advantages_raw_tensor
         
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()  # Force cache cleanup to free reserved but unallocated memory
-        
+            torch.cuda.empty_cache()
+            
     return advantages, returns, metrics
 
 
-
-class AdaptiveKLController:
-    """
-    Adaptive KL controller described in the paper:
-    https://arxiv.org/pdf/1909.08593.pdf
-    """
-
-    def __init__(self, init_kl_coef, target_kl, horizon):
-        self.value = init_kl_coef
-        self.target = target_kl
-        self.horizon = horizon
-
-    def update(self, current_kl, n_steps):
-        target = self.target
-        proportional_error = np.clip(current_kl / target - 1, -0.2, 0.2)
-        mult = 1 + proportional_error * n_steps / self.horizon
-        self.value *= mult
-
-
-class FixedKLController:
-    """Fixed KL controller."""
-
-    def __init__(self, kl_coef):
-        self.value = kl_coef
-
-    def update(self, current_kl, n_steps):
-        pass
-
-
-def get_kl_controller(kl_ctrl):
-    if kl_ctrl.type == "fixed":
-        return FixedKLController(kl_coef=kl_ctrl.kl_coef)
-    elif kl_ctrl.type == "adaptive":
-        assert kl_ctrl.horizon > 0, f"horizon must be larger than 0. Got {kl_ctrl.horizon}"
-        return AdaptiveKLController(init_kl_coef=kl_ctrl.kl_coef, target_kl=kl_ctrl.target_kl, horizon=kl_ctrl.horizon)
-    else:
-        raise NotImplementedError
-
-
-def compute_gae_advantage_return(
-    token_level_rewards: torch.Tensor,
-    values: torch.Tensor,
-    response_mask: torch.Tensor,
-    gamma: torch.Tensor,
-    lam: torch.Tensor,
-):
-    """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
-
-    Args:
-        token_level_rewards: `(torch.Tensor)`
-            shape: (bs, response_length)
-        values: `(torch.Tensor)`
-            shape: (bs, response_length)
-        response_mask: `(torch.Tensor)`
-            shape: (bs, response_length). [EOS] mask. The token after [EOS] have mask zero.
-        gamma: `(float)`
-            discounted factor used in RL
-        lam: `(float)`
-            lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
-
-    Returns:
-        advantages: `(torch.Tensor)`
-            shape: (bs, response_length)
-        Returns: `(torch.Tensor)`
-            shape: (bs, response_length)
-
-    """
-    with torch.no_grad():
-        lastgaelam = 0
-        advantages_reversed = []
-        gen_len = token_level_rewards.shape[-1]
-
-        for t in reversed(range(gen_len)):
-            nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam = delta + gamma * lam * lastgaelam
-            advantages_reversed.append(lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
-
-        returns = advantages + values
-        advantages = verl_F.masked_whiten(advantages, response_mask)
-    return advantages, returns
-
-
-# NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, epsilon: float = 1e-6
 ):

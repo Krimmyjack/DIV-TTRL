@@ -48,7 +48,6 @@ def test_time_train_metrics(
         "ground_truth_ratio": sum(true_rewards) / len(true_rewards),
         "majority_voting_reward": sum(rewards) / len(rewards),
         f"pass@{len(solutions)}": 1.0 if sum(true_rewards) >= 1 else 0.0,
-        "neg_log_likelihood": 0.0,  # Policy entropy placeholder, will be calculated in semantic_novelty.py
     }
     return rewards, ttrl_metrics
 
