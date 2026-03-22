@@ -330,9 +330,6 @@ python -m verl.trainer.main_ppo \
   algorithm.diversity_density_k=4 \
   algorithm.diversity_density_use_metric=consistency_rate \
   algorithm.consistency_threshold=0.8 \
-  +algorithm.lam_div=0.05 \
-  +algorithm.c_max=2 \
-  +algorithm.div_sc_threshold=0.3 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
