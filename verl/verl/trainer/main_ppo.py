@@ -190,6 +190,10 @@ class TaskRunner:
             from verl.workers.reward_manager import TrueLabelTTRLRewardManager
 
             reward_manager_cls = TrueLabelTTRLRewardManager
+        elif reward_manager_name == "delta_passk_ttrl":
+            from verl.workers.reward_manager import DeltaPasskRewardManager
+
+            reward_manager_cls = DeltaPasskRewardManager
         else:
             raise NotImplementedError
 
@@ -204,7 +208,7 @@ class TaskRunner:
         )
 
         # Note that we always use function-based RM for validation
-        if reward_manager_name in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl"]:
+        if reward_manager_name in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl", "delta_passk_ttrl"]:
             val_reward_kwargs = dict(reward_kwargs)  # Copy training parameters
             val_reward_kwargs["mode"] = "eval"       # Override to eval mode
             val_reward_fn = reward_manager_cls(

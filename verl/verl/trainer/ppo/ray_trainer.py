@@ -88,7 +88,6 @@ class AdvantageEstimator(str, Enum):
     ADAPTIVE_PASSK = "adaptive_passk"
     PASS_GRPO_PENALIZED = "pass_grpo_penalized"
 
-
 @dataclass
 class ResourcePoolManager:
     """
@@ -627,7 +626,6 @@ def compute_advantage(
         for kv, cnt in k_counts.items():
             data.meta_info[f"adaptive_passk/num_prompts_k{kv}"] = cnt
         data.meta_info["adaptive_passk/num_prompts_total"] = len(k_values)
-        
         # Log advantage statistics
         if advantages.abs().sum() > 0:
             nonzero_mask = advantages.abs().sum(dim=-1) > 0
@@ -752,7 +750,7 @@ class RayPPOTrainer:
         else:
             raise NotImplementedError
         
-        if self.config.reward_model.reward_manager in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl"]:
+        if self.config.reward_model.reward_manager in ["ttrl", "semantic_ttrl", "diversity_ttrl", "truelabel_ttrl", "delta_passk_ttrl"]:
             self.use_ttrl = True
             self.n_samples_per_prompt = self.config.reward_model.reward_kwargs.n_samples_per_prompt
             self.n_votes_per_prompt = self.config.reward_model.reward_kwargs.n_votes_per_prompt

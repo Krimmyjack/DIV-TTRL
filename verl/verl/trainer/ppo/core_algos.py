@@ -20,12 +20,86 @@ implement PPO
 
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
+import math
 
 import numpy as np
 import torch
 from scipy.special import gammaln
 
 import verl.utils.torch_functional as verl_F
+
+
+# ==============================================================================
+# Delta Pass@k: Label-Free Expected Marginal Contribution Utilities
+# ==============================================================================
+
+def compute_delta_pass_k(N: int, c: int, k: int) -> float:
+    """
+    Compute the marginal contribution Δ(c) of one sample to a cluster of size c
+    in the Pass@k probability.
+    
+    Δ(c) = S(c) - S(c-1) = C(N-c, k-1) / C(N, k)
+    
+    This measures how much a single sample's existence raises the probability
+    of its answer cluster being sampled in a random k-subset.
+    
+    Properties:
+        - Strictly monotonically decreasing in c
+        - Maximum at c=1: Δ(1) = k/N
+        - Approaches 0 as c → N-k+1
+    
+    Args:
+        N: Total number of samples (rollout universe size)
+        c: Current cluster size (how many times this answer appeared)
+        k: Target k for pass@k
+    
+    Returns:
+        float: The marginal contribution value
+    """
+    if c > N or c < 1:
+        return 0.0
+    if (N - c) < (k - 1):
+        # When cluster is so big that remaining samples can't fill k-1 slots,
+        # the marginal contribution is 0 (already saturated)
+        return 0.0
+    if k <= 0 or N <= 0:
+        return 0.0
+    return math.comb(N - c, k - 1) / math.comb(N, k)
+
+
+def compute_expected_marginal_passk_rewards(
+    cluster_sizes: List[int],
+    N: int,
+    k: int,
+) -> List[float]:
+    """
+    Compute the expected marginal Pass@k reward for each sample based on its
+    cluster size. This is the core "bandpass filter" reward function:
+    
+        g(c) = P(correct) * Δ(c) = (c/N) * Δ(c)
+    
+    where P(correct) ≈ c/N is the Bayesian prior that this cluster is the
+    correct answer (self-consistency frequency).
+    
+    The resulting function has an inverted-U shape:
+        - c=1 (hallucination): P(correct)≈0 → g≈0 (filters noise)
+        - c≈N (majority):      Δ(c)≈0     → g≈0 (penalizes over-exploitation)
+        - c moderate:           g peaks     → rewards exploration
+    
+    Args:
+        cluster_sizes: List of cluster sizes c_i, one per sample (length N)
+        N: Total number of samples
+        k: Target k for pass@k
+    
+    Returns:
+        List[float]: Reward values for each sample
+    """
+    rewards = []
+    for c in cluster_sizes:
+        delta = compute_delta_pass_k(N, c, k)
+        p_correct = c / N if N > 0 else 0.0
+        rewards.append(p_correct * delta)
+    return rewards
 
 
 # ==============================================================================

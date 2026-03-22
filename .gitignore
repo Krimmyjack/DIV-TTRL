@@ -3,3 +3,9 @@ DIVERSITY_PIPELINE_GUIDE.md
 IMPLEMENTATION_SUMMARY.md 
 PASS_GRPO_*.md 
 test_*.py
+verl/plots/
+verl/plots_qwen4b/
+verl/plots_qwen4b_0.5/
+*.jsonl
+__pycache__/
+*.pyc

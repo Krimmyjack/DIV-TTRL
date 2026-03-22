@@ -1,5 +1,5 @@
 """
-python rollouts.py --model_path Qwen/Qwen3-4B-Base --output_file qwen4b.jsonl --num_return_sequences 64 --temperature 1 --max_samples 1 --dataset_name  --split
+python scripts/rollouts.py --model_path /root/autodl-tmp/model/Qwen3-4B-Base --output_file qwen4b.jsonl --num_return_sequences 64 --temperature 1 --dataset_name  --split
 """
 import json
 import torch
