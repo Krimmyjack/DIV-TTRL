@@ -1,4 +1,3 @@
-
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -450,6 +449,9 @@ class DiversityTTRLRewardManager:
                 verified_label=verified_label
             )
 
+            # Keep a copy of the original rewards before bootstrap modifies them
+            original_base_rewards = list(base_rewards)
+
             # Record self-verification metrics
             if use_self_verify:
                 vr = verify_results[prompt_i] if prompt_i < len(verify_results) else {}
@@ -525,7 +527,8 @@ class DiversityTTRLRewardManager:
             
             for i in range(self.n_votes_per_prompt):
                 # TTA answer_types (based on pseudo-label / majority voting)
-                is_correct = base_rewards[i] > 0
+                # Use original_base_rewards to avoid lumping all P_boot > 0 answers into type 0
+                is_correct = original_base_rewards[i] > 0
                 if is_correct:
                     ans_type = 0
                 else:

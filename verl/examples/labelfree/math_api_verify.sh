@@ -1,12 +1,7 @@
 #!/bin/bash
 """
-<<<<<<< Updated upstream
 ENABLE_NGRAM_PENALTY=False bash examples/labelfree/math_api_verify.sh --backbone /root/autodl-tmp/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
 python /root/autodl-tmp/DIV-TTRL/verl/scripts/model_merger.py \
-=======
-CUDA_VISIBLE_DEVICES=2,3,4,5 ENABLE_NGRAM_PENALTY=False bash examples/labelfree/math_api_verify.sh --backbone /data/home/jianfeng/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base --clip-high --ent 0.003
-python /data/home/jianfeng/DIV-TTRL-PR/verl/scripts/model_merger.py \
->>>>>>> Stashed changes
     --backend fsdp \
     --local_dir /data/home/jianfeng/model/TTRL-MATH500/MATH-TTT-Qwen3-4B-Base/diversity-RL-Ent0.000/164436/global_step_60/actor \
     --hf_model_path /data/home/jianfeng/data/models/modelscope_cache/models/Qwen/Qwen3-4B-Base \
@@ -335,9 +330,6 @@ python -m verl.trainer.main_ppo \
   algorithm.diversity_density_k=4 \
   algorithm.diversity_density_use_metric=consistency_rate \
   algorithm.consistency_threshold=0.8 \
-  +algorithm.lam_div=0.05 \
-  +algorithm.c_max=2 \
-  +algorithm.div_sc_threshold=0.3 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \
