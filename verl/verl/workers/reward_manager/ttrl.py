@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import numpy as np
 import torch
 
 from verl import DataProto
 from verl.utils.reward_score.ttrl.auto_verify import auto_verify
+from verl.utils.reward_score.ttrl.auto_extract import auto_extract
 from verl.utils.reward_score.ttrl.ttt_metrics import (
     post_test_time_train_metrics, test_time_train_metrics)
 
@@ -208,6 +209,12 @@ class TTRLRewardManager:
             all_ttrl_metrics = defaultdict(list)
 
             scores = [0.0 for _ in range(len(data))]
+            all_answer_types = []
+            all_oracle_answer_types = []
+            all_consistency_rates = []
+            all_accuracy_rates = []
+            all_label_accuracies = []
+            all_zero_advantage_masks = []
 
             for prompt_i in range(prompt_num):
                 group_pred_outputs = []
@@ -261,6 +268,47 @@ class TTRLRewardManager:
                 ttrl_metrics["false_positive_rate"] = fp_rate
                 ttrl_metrics["false_negative_rate"] = fn_rate
 
+                # === Extract answer types and diagnostic metrics ===
+                final_answers = auto_extract(task, group_pred_outputs, extra_info=group_extra_info)
+                freq = Counter(final_answers)
+                majority_num = max(freq.values()) if freq else 0
+                consistency_rate = majority_num / self.n_votes_per_prompt if self.n_votes_per_prompt > 0 else 0.0
+                accuracy_rate = ttrl_metrics.get("ground_truth_ratio", 0.0)
+                label_accuracy = ttrl_metrics.get("label_accuracy", 0.0)
+                
+                # Create answer type mapping
+                answer_to_id = {ans: hash(ans) for ans in set(final_answers)}
+                
+                group_answer_types = []
+                group_oracle_answer_types = []
+                
+                for i in range(self.n_votes_per_prompt):
+                    # TTA answer_types (based on pseudo-label / majority voting)
+                    is_correct = rewards[i] > 0
+                    if is_correct:
+                        ans_type = 0
+                    else:
+                        ans_type = answer_to_id[final_answers[i]]
+                        if ans_type == 0:
+                            ans_type = 1
+                    group_answer_types.append(ans_type)
+                    
+                    # Oracle answer_types (based on ground truth)
+                    if true_rewards[i] > 0:
+                        oracle_type = 0
+                    else:
+                        oracle_type = answer_to_id[final_answers[i]]
+                        if oracle_type == 0:
+                            oracle_type = 1
+                    group_oracle_answer_types.append(oracle_type)
+                    
+                all_answer_types.extend(group_answer_types)
+                all_oracle_answer_types.extend(group_oracle_answer_types)
+                all_consistency_rates.extend([consistency_rate] * self.n_votes_per_prompt)
+                all_accuracy_rates.extend([accuracy_rate] * self.n_votes_per_prompt)
+                all_label_accuracies.extend([label_accuracy] * self.n_votes_per_prompt)
+                all_zero_advantage_masks.extend([0.0] * self.n_votes_per_prompt)
+
                 # === Calculate strategy entropy ===
                 current_group_data = data[prompt_i * self.n_votes_per_prompt:(prompt_i + 1) * self.n_votes_per_prompt]
                 strategy_entropy = self._compute_strategy_entropy(current_group_data)
@@ -293,6 +341,29 @@ class TTRLRewardManager:
                     print(f"[{k}]", v)
                     ttrl_info[k] = v
 
+            # Store per-sample arrays for downstream advantage computation (only training samples)
+            training_answer_types = []
+            training_oracle_answer_types = []
+            training_consistency_rates = []
+            training_accuracy_rates = []
+            training_label_accuracies = []
+            training_zero_masks = []
+            for prompt_i in range(prompt_num):
+                for i in range(self.n_samples_per_prompt):
+                    global_idx = prompt_i * self.n_votes_per_prompt + i
+                    training_answer_types.append(all_answer_types[global_idx])
+                    training_oracle_answer_types.append(all_oracle_answer_types[global_idx])
+                    training_consistency_rates.append(all_consistency_rates[global_idx])
+                    training_accuracy_rates.append(all_accuracy_rates[global_idx])
+                    training_label_accuracies.append(all_label_accuracies[global_idx])
+                    training_zero_masks.append(all_zero_advantage_masks[global_idx])
+            
+            ttrl_info["_answer_types"] = np.array(training_answer_types)
+            ttrl_info["_oracle_answer_types"] = np.array(training_oracle_answer_types)
+            ttrl_info["_consistency_rate"] = np.array(training_consistency_rates)
+            ttrl_info["_accuracy_rate"] = np.array(training_accuracy_rates)
+            ttrl_info["_label_accuracy"] = np.array(training_label_accuracies)
+            ttrl_info["_zero_advantage_mask"] = np.array(training_zero_masks)
 
             return reward_tensor, reward_extra_info, ttrl_info
 

@@ -144,7 +144,7 @@ DATE=$(date +%m%d)
 TIME_TAG=$(date +%H%M%S)
 # TIME_TAG=182434
 
-ADVANTAGE="BOOTSTRAP_PASSK"
+ADVANTAGE="pass_grpo_penalized"
 
 echo "=== Basic Configuration Information ==="
 echo "Task: $TASK"
@@ -258,14 +258,14 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Experiment name: $LOG_NAME"
 echo "==============================="
 
-  # reward_model.reward_manager=diversity_ttrl \
+  # reward_model.reward_manager=ttrl \
   # reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   # reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   # reward_model.reward_kwargs.mode="train" \
 
 # # ------------------------------------------------------------
 python -m verl.trainer.main_ppo \
-  reward_model.reward_manager=diversity_ttrl \
+  reward_model.reward_manager=ttrl \
   reward_model.reward_kwargs.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   reward_model.reward_kwargs.n_votes_per_prompt=$N_VOTES_PER_PROMPT \
   reward_model.reward_kwargs.mode="train" \
@@ -321,6 +321,9 @@ python -m verl.trainer.main_ppo \
   algorithm.diversity_density_k=2 \
   algorithm.diversity_density_use_metric=consistency_rate \
   algorithm.consistency_threshold=0.8 \
+  algorithm.lam_div=0.05 \
+  algorithm.c_max=2 \
+  algorithm.div_sc_threshold=0.3 \
   trainer.logger=['console','wandb'] \
   trainer.project_name=$WANDB_PROJECT \
   trainer.experiment_name=$LOG_NAME \

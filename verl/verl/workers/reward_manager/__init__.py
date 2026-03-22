@@ -14,11 +14,9 @@
 
 from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
-from .delta_passk import DeltaPasskRewardManager
 from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
-from .diversity_reward import DiversityTTRLRewardManager
 from .ttrl import TTRLRewardManager
-from .semantic_novelty import SemanticTTRLRewardManager
+
 from .truelabel_ttrl import TrueLabelTTRLRewardManager
 

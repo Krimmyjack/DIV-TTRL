@@ -12,7 +12,7 @@ from verl.utils.reward_score.ttrl.auto_extract import auto_extract
 
 # You can override these via environment variables if needed
 API_KEY = os.environ.get("AUTODL_API_KEY", "EMPTY")
-BASE_URL = os.environ.get("AUTODL_BASE_URL", "https://u630113-8ba4-8da84932.westc.gpuhub.com:8443/v1")
+BASE_URL = os.environ.get("AUTODL_BASE_URL", "https://u630113-8ba4-8da84932.westc.seetacloud.com:8443/v1")
 MODEL = os.environ.get("AUTODL_MODEL", "qwen3-4b-base")
 
 # =====================================================
@@ -147,8 +147,13 @@ def call_api(system_prompt, user_content, max_tokens=4096):
             http_client=custom_http_client
         )
         
-        # Combine system prompt and user problem into a single base model prompt
-        prompt = f"{system_prompt}\n\n{user_content}\n\nReasoning:\n"
+        # Format the prompt using Qwen's ChatML template (simulating apply_chat_template)
+        # This gives structure to Base models without downloading tokenizers in ray workers
+        prompt = (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{user_content}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
         
         response = client.completions.create(
             model=MODEL,

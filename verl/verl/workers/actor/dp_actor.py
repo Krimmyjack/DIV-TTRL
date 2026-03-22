@@ -345,8 +345,9 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
+                    compute_topk = self.config.get("compute_topk_metrics", True)  # Can disable to save memory
                     entropy, log_prob, topk = self._forward_micro_batch(
-                        micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy, compute_topk=True
+                        micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy, compute_topk=compute_topk
                     )
 
                     pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
@@ -404,6 +405,10 @@ class DataParallelPPOActor(BasePPOActor):
                             k_th_log_prob = topk[:, :, k_idx]  # (bsz, response_length)
                             avg_kth = (k_th_log_prob * response_mask).sum() / response_mask.sum().clamp(min=1)
                             data[f"actor/topk_logprob_k{k_idx+1}"] = avg_kth.detach().item()
+                        # Explicitly release topk tensor to free GPU memory
+                        del topk
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
